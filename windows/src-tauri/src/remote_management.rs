@@ -1636,7 +1636,7 @@ fn effective_display_name(config: &Config) -> String {
     if name.is_empty() {
         std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
-            .unwrap_or_else(|_| "Gentleman-PC".to_string())
+            .unwrap_or_else(|_| "Nas-PC".to_string())
     } else {
         name.to_string()
     }

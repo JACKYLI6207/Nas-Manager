@@ -22,7 +22,7 @@
 
 ## 正式版 v1.0.0
 
-預編譯檔案見 [GitHub Releases](https://github.com/JACKYLI6207/Nas-Manager/releases/tag/v1.0.0)（或本機 `releases/`）：
+預編譯檔案見本儲存庫 [Releases](https://github.com/Nas-Manager/Nas-Manager/releases/tag/v1.0.0) 頁面（或本機 `releases/`）：
 
 | 檔案 | 說明 |
 |------|------|

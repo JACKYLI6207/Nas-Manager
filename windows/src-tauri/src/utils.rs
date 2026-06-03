@@ -1,9 +1,9 @@
-/// 回傳應用程式的資料目錄：`%APPDATA%\Gentleman Manager`
+/// 回傳應用程式的資料目錄：`%APPDATA%\Nas Manager`
 pub fn app_data_dir() -> anyhow::Result<std::path::PathBuf> {
     let appdata = std::env::var("APPDATA")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    Ok(appdata.join("Gentleman Manager"))
+    Ok(appdata.join("Nas Manager"))
 }
 
 pub fn filename_filter(s: &str) -> String {

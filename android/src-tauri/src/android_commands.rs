@@ -5,6 +5,13 @@ use tokio::sync::oneshot;
 use crate::errors::{CommandError, CommandResult};
 use crate::mobile_settings::MobileSettings;
 
+#[cfg(not(target_os = "android"))]
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
+pub struct PlayVideoResult {
+    pub cancelled: bool,
+    pub background: bool,
+}
+
 #[cfg(target_os = "android")]
 use crate::clipboard_plugin::clipboard_plugin;
 #[cfg(target_os = "android")]
@@ -24,7 +31,7 @@ async fn pick_folder_path(app: &AppHandle) -> CommandResult<Option<String>> {
         });
     let picked = rx
         .await
-        .map_err(|_| CommandError::from("?豢?鞈?憭曉仃??, anyhow::anyhow!("撠店獢歇??")))?;
+        .map_err(|_| CommandError::from("選擇資料夾失敗", anyhow::anyhow!("對話框已關閉")))?;
     Ok(picked.map(|p| p.to_string()))
 }
 
@@ -51,7 +58,7 @@ pub fn copy_text_to_clipboard(app: AppHandle, text: String) -> CommandResult<()>
 #[tauri::command]
 #[specta::specta]
 pub fn get_mobile_settings(app: AppHandle) -> CommandResult<MobileSettings> {
-    MobileSettings::load(&app).map_err(|e| CommandError::from("霈?身摰仃??, e))
+    MobileSettings::load(&app).map_err(|e| CommandError::from("讀取設定失敗", e))
 }
 
 #[tauri::command]
@@ -59,7 +66,7 @@ pub fn get_mobile_settings(app: AppHandle) -> CommandResult<MobileSettings> {
 pub fn save_mobile_settings(app: AppHandle, settings: MobileSettings) -> CommandResult<()> {
     settings
         .save(&app)
-        .map_err(|e| CommandError::from("?脣?閮剖?憭望?", e))
+        .map_err(|e| CommandError::from("儲存設定失敗", e))
 }
 
 pub(crate) async fn pick_writable_folder_path(app: &AppHandle) -> CommandResult<Option<String>> {
@@ -72,123 +79,11 @@ pub(crate) async fn pick_writable_folder_path(app: &AppHandle) -> CommandResult<
         let writable = picker.probe_tree_writable(&path)?;
         if !writable {
             return Err(CommandError::from(
-                "?桅?銝撖?,
-                anyhow::anyhow!("隢?詨撖怠?桅?嚗????航???"),
+                "目錄不可寫",
+                anyhow::anyhow!("請改選可寫入目錄（目前目錄僅可讀取）"),
             ));
         }
     }
-    Ok(Some(path))
-}
-
-/// `persist = false` ???頝臬?嚗??嗉?摮?撠蝑?甈⊥批神?伐?嚗?閬神敹怎鞈?憭曇身摰?#[tauri::command]
-#[specta::specta]
-pub async fn pick_category_directory(
-    app: AppHandle,
-    persist: Option<bool>,
-) -> CommandResult<Option<String>> {
-    let Some(path) = pick_writable_folder_path(&app).await? else {
-        return Ok(None);
-    };
-    if persist.unwrap_or(true) {
-        let mut settings =
-            MobileSettings::load(&app).map_err(|e| CommandError::from("霈?身摰仃??, e))?;
-        settings.category_directory = Some(path.clone());
-        settings
-            .save(&app)
-            .map_err(|e| CommandError::from("?脣?閮剖?憭望?", e))?;
-    }
-    Ok(Some(path))
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn pick_import_archive_file(app: AppHandle) -> CommandResult<Option<String>> {
-    #[cfg(target_os = "android")]
-    {
-        let picker = folder_picker(&app)?;
-        return Ok(picker.pick_open_archive()?);
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = app;
-        Err(CommandError::from(
-            "銝?渡?撟喳",
-            anyhow::anyhow!("??Android ?舫??瑼?獢?),
-        ))
-    }
-}
-
-#[tauri::command]
-#[specta::specta]
-pub fn read_import_archive_file(app: AppHandle, path: String) -> CommandResult<String> {
-    #[cfg(target_os = "android")]
-    if path.starts_with("content://") {
-        let picker = folder_picker(&app)?;
-        return picker.read_text(&path);
-    }
-    std::fs::read_to_string(&path).map_err(|err| {
-        CommandError::from(
-            "霈??瑼仃??,
-            anyhow::anyhow!("霈??瑼{path}`憭望?: {err}"),
-        )
-    })
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn pick_korean_txt_file(app: AppHandle) -> CommandResult<Option<String>> {
-    #[cfg(target_os = "android")]
-    {
-        let picker = folder_picker(&app)?;
-        let Some(uri) = picker.pick_open_txt()? else {
-            return Ok(None);
-        };
-        {
-            let config_state = app.state::<parking_lot::RwLock<crate::config::Config>>();
-            let mut config = config_state.write();
-            config.korean_txt_catalog_dir = std::path::PathBuf::from(&uri);
-            let _ = config.save(&app);
-        }
-        return Ok(Some(uri));
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = app;
-        Err(CommandError::from(
-            "銝?渡?撟喳",
-            anyhow::anyhow!("??Android ?舫??TXT 瑼?"),
-        ))
-    }
-}
-
-#[tauri::command]
-#[specta::specta]
-pub async fn pick_download_directory(app: AppHandle) -> CommandResult<Option<String>> {
-    let Some(path) = pick_folder_path(&app).await? else {
-        return Ok(None);
-    };
-    #[cfg(target_os = "android")]
-    {
-        let picker = folder_picker(&app)?;
-        let writable = picker.probe_tree_writable(&path)?;
-        if !writable {
-            return Err(CommandError::from(
-                "銝??桅?銝撖?,
-                anyhow::anyhow!("隢?詨撖怠?桅?嚗????航???"),
-            ));
-        }
-    }
-    let mut settings = MobileSettings::load(&app).map_err(|e| CommandError::from("霈?身摰仃??, e))?;
-    settings.download_directory = Some(path.clone());
-    {
-        let config_state = app.state::<parking_lot::RwLock<crate::config::Config>>();
-        let mut config = config_state.write();
-        config.download_dir = std::path::PathBuf::from(&path);
-        let _ = config.save(&app);
-    }
-    settings
-        .save(&app)
-        .map_err(|e| CommandError::from("?脣?閮剖?憭望?", e))?;
     Ok(Some(path))
 }
 
@@ -264,8 +159,8 @@ pub fn play_local_video_file(
     {
         let _ = (app, uri, title, subtitle_uris, resume_only);
         Err(CommandError::from(
-            "???Android",
-            anyhow::anyhow!("獢??批遣敶梁??剜??),
+            "僅支援 Android",
+            anyhow::anyhow!("桌面版無內建影片播放器"),
         ))
     }
 }
@@ -359,7 +254,7 @@ pub async fn play_remote_pc_video(
     {
         ensure_pc_remote_api_v5(&host, port)
             .await
-            .map_err(|e| CommandError::from("PC 銝?游蔣?葡瘚?, e))?;
+            .map_err(|e| CommandError::from("PC 不支援影片串流", e))?;
         let stream_url = build_pc_stream_url(&host, port, &rel_path);
         let player = local_video_player(&app)?;
         let subs = subtitle_uris.unwrap_or_default();
@@ -387,9 +282,8 @@ pub async fn play_remote_pc_video(
             resume_only,
         );
         Err(CommandError::from(
-            "???Android",
-            anyhow::anyhow!("獢??批遣敶梁??剜??),
+            "僅支援 Android",
+            anyhow::anyhow!("桌面版無內建影片播放器"),
         ))
     }
 }
-

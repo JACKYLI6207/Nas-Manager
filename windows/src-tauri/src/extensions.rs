@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use parking_lot::RwLock;
 use scraper::error::SelectorErrorKind;
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::config::Config;
 
@@ -28,6 +28,27 @@ pub trait ToAnyhow<T> {
 impl<T> ToAnyhow<T> for Result<T, SelectorErrorKind<'_>> {
     fn to_anyhow(self) -> anyhow::Result<T> {
         self.map_err(|e| anyhow!(e.to_string()))
+    }
+}
+
+pub trait PathIsImg {
+    fn is_img(&self) -> bool;
+    fn is_common_img(&self) -> bool;
+}
+
+impl PathIsImg for std::path::Path {
+    fn is_img(&self) -> bool {
+        self.extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_lowercase)
+            .is_some_and(|ext| matches!(ext.as_str(), "jpg" | "png" | "webp" | "gif"))
+    }
+
+    fn is_common_img(&self) -> bool {
+        self.extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_lowercase)
+            .is_some_and(|ext| matches!(ext.as_str(), "jpg" | "png" | "webp"))
     }
 }
 

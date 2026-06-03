@@ -1,7 +1,7 @@
 use anyhow::anyhow;
 use parking_lot::RwLock;
 use scraper::error::SelectorErrorKind;
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::config::Config;
 

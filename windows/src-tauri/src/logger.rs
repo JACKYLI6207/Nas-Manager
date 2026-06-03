@@ -132,7 +132,7 @@ where
     }
     let logs_dir = logs_dir(app).context("獲取日誌目錄失敗")?;
     let file_appender = RollingFileAppender::builder()
-        .filename_prefix("Gentleman-Manager")
+        .filename_prefix("Nas-Manager")
         .filename_suffix("log")
         .rotation(Rotation::DAILY)
         .build(&logs_dir)
