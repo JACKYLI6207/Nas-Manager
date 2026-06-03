@@ -22,7 +22,7 @@
 
 ## 正式版 v1.0.0
 
-預編譯檔案見本儲存庫 [Releases](https://github.com/Nas-Manager/Nas-Manager/releases/tag/v1.0.0) 頁面（或本機 `releases/`）：
+預編譯檔案見本儲存庫 **Releases** 頁面（標籤 `v1.0.0`；本機副本在 `releases/`）：
 
 | 檔案 | 說明 |
 |------|------|
