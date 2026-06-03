@@ -75,8 +75,22 @@
 | 元件 | 授權 | 用途 |
 |------|------|------|
 | [AndroidX / Material Components](https://github.com/androidx/androidx) | Apache-2.0 | UI 與相容函式庫 |
-| [Google ExoPlayer (Media3)](https://github.com/androidx/media) | Apache-2.0 | 本地/串流影片播放 |
+| [Google ExoPlayer / Media3](https://github.com/androidx/media) | Apache-2.0 | 本地/HTTP Range 串流影片播放核心 |
+| [Jellyfin media3-ffmpeg-decoder](https://github.com/jellyfin/jellyfin-androidx-media) | MIT（請以發佈版 POM/AAR 所附 LICENSE 為準） | Media3 FFmpeg 軟體解碼擴充 |
 | [Kotlin / Gradle](https://kotlinlang.org/) | Apache-2.0 | 建置與語言 |
+
+### 4.1 Just Player（moneytoo/Player）— 技術參考
+
+| 項目 | 說明 |
+|------|------|
+| **專案** | https://github.com/moneytoo/Player |
+| **常見名稱** | Just Player |
+| **授權** | [Unlicense](https://unlicense.org/)（公有領域） |
+| **與 Nas Manager 之關係** | 開發時**參考** ExoPlayer/Media3 整合模式與播放器互動設計；**未**整包合併 Just Player App，亦未修改後以 Just Player 名義發佈 |
+| **實作** | 本儲存庫 `android/.../LocalVideoPlayerActivity.kt` 等檔案為 Nas Manager **獨立實作與維護** |
+| **義務** | Unlicense 不要求著作權標示，但本專案基於透明原則仍於此列出；再分發時請一併保留本文件 |
+
+> FFmpeg 為多媒體解碼元件，可能涉及專利議題；商業使用或再分發前請自行評估合規需求。
 
 完整 Gradle 依賴樹：於 `android/src-tauri/gen/android` 執行 `./gradlew :app:dependencies`（需先完成 Android 專案初始化）。
 
