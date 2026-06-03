@@ -1,0 +1,54 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Dependencies & frontend build
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Rust / Tauri
+src-tauri/target/
+
+# Built binaries & release artifacts
+*.exe
+*.zip
+*.msi
+*.dmg
+*.AppImage
+icon-extracted.png
+icon-extracted.ico
+
+# Local snapshot exports
+Website Snapshot/
+repair/
+old/
+.tmp-*/
+
+# Local Cursor / dev tooling (do not push to GitHub)
+.cursor/
+skill/
+logo.ico
+
+# Editor & OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Env & secrets
+.env
+.env.*
+!.env.example

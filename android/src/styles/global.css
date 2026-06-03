@@ -1,0 +1,39 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  -webkit-text-size-adjust: 100%;
+  background: #121212;
+  /* Android WebView 常回報 safe-area 為 0；與 App.vue 頂部列一致 */
+  --gm-safe-top: max(env(safe-area-inset-top, 0px), 28px);
+  --gm-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --gm-sub-tab-pad-y: clamp(6px, 1.8vw, 10px);
+  --gm-sub-tab-pad-x: clamp(2px, 1vw, 6px);
+  --gm-sub-tab-fs: clamp(10px, 2.5vw, 12px);
+  --gm-sub-tab-gap: clamp(2px, 0.8vw, 6px);
+}
+
+body {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+  background: #121212;
+  color: #eee;
+}
+
+#app {
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 0;
+}

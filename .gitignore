@@ -1,0 +1,37 @@
+# Dependencies & build
+node_modules/
+dist/
+target/
+*.apk
+*.zip
+*.exe
+.build-apk-timing*.json
+
+# IDE / local
+.cursor/
+.vscode/
+*.log
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Android Gradle (regenerated on build)
+android/src-tauri/gen/android/app/build/
+android/src-tauri/gen/android/build/
+android/src-tauri/target/
+
+# Windows
+windows/src-tauri/target/
+
+# Secrets
+*.keystore
+*.jks
+*.p12
+
+# Personal assets (do not commit)
+logo.ico
+app-icon.png
+**/Website Snapshot/

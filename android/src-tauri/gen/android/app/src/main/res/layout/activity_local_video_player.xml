@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000"
+    android:fitsSystemWindows="false">
+
+    <androidx.media3.ui.PlayerView
+        android:id="@+id/player_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        app:controller_layout_id="@layout/nas_exo_player_control_view"
+        app:show_buffering="when_playing"
+        app:show_subtitle_button="true"
+        app:use_controller="true"
+        app:resize_mode="fit"
+        app:surface_type="surface_view" />
+
+    <HorizontalScrollView
+        android:id="@+id/top_chrome_scroll"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:clipToPadding="false"
+        android:fillViewport="true"
+        android:fitsSystemWindows="false"
+        android:scrollbars="none"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/top_chrome"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="6dp"
+            android:paddingEnd="6dp"
+            android:paddingBottom="4dp">
+
+            <Button
+                android:id="@+id/btn_exit"
+                style="?android:attr/buttonBarButtonStyle"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:backgroundTint="#CC1A2744"
+                android:minWidth="0dp"
+                android:minHeight="0dp"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:text="返回"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF"
+                android:textSize="11sp" />
+        </LinearLayout>
+    </HorizontalScrollView>
+
+</FrameLayout>
