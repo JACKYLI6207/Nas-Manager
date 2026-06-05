@@ -26,6 +26,13 @@ class SyncStreamPlaylistArgs {
 }
 
 @InvokeArg
+class GetVideoPlaybackProgressArgs {
+    var host: String = ""
+    var port: Int = 0
+    var relPath: String = ""
+}
+
+@InvokeArg
 class PlayLocalVideoArgs {
     var uri: String = ""
     var title: String? = null
@@ -219,6 +226,26 @@ class LocalVideoPlugin(private val activity: Activity) : Plugin(activity) {
     fun getBackgroundPlaybackSession(invoke: Invoke) {
         val ret = JSObject()
         ret.put("sessionJson", VideoPlaybackSessionStore.toJson(activity).orEmpty())
+        invoke.resolve(ret)
+    }
+
+    @Command
+    fun getVideoPlaybackProgress(invoke: Invoke) {
+        val args = invoke.parseArgs(GetVideoPlaybackProgressArgs::class.java)
+        val host = args.host.trim()
+        val relPath = args.relPath.trim()
+        val port = args.port
+        val key =
+            VideoProgressStore.key(
+                host.takeIf { it.isNotEmpty() },
+                port,
+                relPath.takeIf { it.isNotEmpty() },
+                null,
+            )
+        val (pos, dur) = VideoProgressStore.loadRecord(activity, key)
+        val ret = JSObject()
+        ret.put("positionMs", pos)
+        ret.put("durationMs", dur)
         invoke.resolve(ret)
     }
 

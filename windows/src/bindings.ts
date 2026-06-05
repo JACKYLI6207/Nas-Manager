@@ -14,6 +14,14 @@ export const commands = {
       else return { status: 'error', error: e as CommandError }
     }
   },
+  async bindShareRootPath(path: string): Promise<Result<ShareRootBindResult, CommandError>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('bind_share_root_path', { path }) }
+    } catch (e) {
+      if (e instanceof Error) throw e
+      else return { status: 'error', error: e as CommandError }
+    }
+  },
   async getRemoteManagementStatus(): Promise<RemoteManagementStatus> {
     return await TAURI_INVOKE('get_remote_management_status')
   },
@@ -29,6 +37,18 @@ export const commands = {
 
 export type CommandError = { err_title: string; err_message: string }
 export type Result<T, E> = { status: 'ok'; data: T } | { status: 'error'; error: E }
+
+/** Volume GUID 綁定：磁碟代號變更後仍可還原分享路徑 */
+export type ShareRootBinding = {
+  volumeGuid: string
+  relativePath: string
+  displayHint: string
+}
+
+export type ShareRootBindResult = {
+  binding: ShareRootBinding
+  resolvedPath: string
+}
 
 export type Config = {
   cookie: string
@@ -55,6 +75,7 @@ export type Config = {
   remoteManagementDir: string
   remoteManagementShareSlots: number
   remoteManagementDirs: string[]
+  remoteManagementShareRoots: ShareRootBinding[]
   remoteManagementPort: number
   remoteManagementToken: string
   remoteManagementDisplayName: string

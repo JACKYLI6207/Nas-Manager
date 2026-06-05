@@ -370,6 +370,32 @@ fn read_comic_image_at(source: &Path, entry: &str) -> anyhow::Result<Vec<u8>> {
     Err(anyhow!("無效的圖片來源"))
 }
 
+pub fn list_local_reader_sources_with_app(
+    _app: &tauri::AppHandle,
+    folder_path: &str,
+) -> anyhow::Result<Vec<LocalReaderSource>> {
+    list_local_reader_sources(folder_path)
+}
+
+pub fn prepare_local_reader_zip(_app: &tauri::AppHandle, source_uri: &str) -> anyhow::Result<String> {
+    Ok(source_uri.to_string())
+}
+
+pub fn load_local_reader_pages_with_app(
+    _app: &tauri::AppHandle,
+    source_path: &str,
+    _source_kind: Option<LocalReaderSourceKind>,
+) -> anyhow::Result<LocalReaderPages> {
+    load_local_reader_pages(source_path)
+}
+
+pub fn read_local_reader_image_with_app(
+    _app: &tauri::AppHandle,
+    page_id: &str,
+) -> anyhow::Result<Vec<u8>> {
+    read_local_reader_image(page_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::compare_natural;

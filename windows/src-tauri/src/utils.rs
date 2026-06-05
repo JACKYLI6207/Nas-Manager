@@ -6,6 +6,11 @@ pub fn app_data_dir() -> anyhow::Result<std::path::PathBuf> {
     Ok(appdata.join("Nas Manager"))
 }
 
+pub fn app_data_dir_for(app: &tauri::AppHandle) -> anyhow::Result<std::path::PathBuf> {
+    let _ = app;
+    app_data_dir()
+}
+
 pub fn filename_filter(s: &str) -> String {
     s.chars()
         .map(|c| match c {

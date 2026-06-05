@@ -50,6 +50,7 @@ pub fn run() {
             play_local_video_file,
             play_remote_pc_video,
             get_background_playback_session,
+            get_video_playback_progress,
             stop_video_playback,
             sync_stream_playlist,
             copy_text_to_clipboard,

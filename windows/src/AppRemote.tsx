@@ -1,17 +1,32 @@
 import { defineComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { open } from '@tauri-apps/plugin-dialog'
-import { commands, type Config, type RemoteManagementStatus } from './bindings.ts'
+import {
+  commands,
+  type Config,
+  type RemoteManagementStatus,
+  type ShareRootBinding,
+} from './bindings.ts'
 
 function clampSlots(n: number): number {
   if (!Number.isFinite(n)) return 3
   return Math.min(16, Math.max(1, Math.round(n)))
 }
 
-function ensureShareDirs(config: Config): string[] {
+const EMPTY_BINDING: ShareRootBinding = {
+  volumeGuid: '',
+  relativePath: '',
+  displayHint: '',
+}
+
+function isBindingEmpty(b: ShareRootBinding): boolean {
+  return !b.volumeGuid?.trim()
+}
+
+function ensureShareRoots(config: Config): ShareRootBinding[] {
   const slots = clampSlots(config.remoteManagementShareSlots ?? 3)
-  const dirs = [...(config.remoteManagementDirs ?? [])]
-  while (dirs.length < slots) dirs.push('')
-  return dirs.slice(0, slots)
+  const roots = [...(config.remoteManagementShareRoots ?? [])]
+  while (roots.length < slots) roots.push({ ...EMPTY_BINDING })
+  return roots.slice(0, slots)
 }
 
 export default defineComponent({
@@ -19,23 +34,34 @@ export default defineComponent({
   setup() {
     const config = ref<Config | null>(null)
     const status = ref<RemoteManagementStatus | null>(null)
-    const shareDirs = ref<string[]>([])
+    const shareRoots = ref<ShareRootBinding[]>([])
     const loading = ref(true)
     const saving = ref(false)
     const message = ref('')
     let timer: ReturnType<typeof setInterval> | null = null
     let autoSaveTimer: ReturnType<typeof setTimeout> | null = null
 
-    function syncShareDirsFromConfig() {
+    function syncShareRootsFromConfig() {
       if (!config.value) return
-      shareDirs.value = ensureShareDirs(config.value)
+      shareRoots.value = ensureShareRoots(config.value)
     }
 
-    function applyShareDirsToConfig() {
+    function shareRootLabel(index: number): string {
+      const binding = shareRoots.value[index]
+      if (!binding || isBindingEmpty(binding)) return '（未指定）'
+      const resolved = status.value?.shareDirs?.[index]
+      if (resolved) return resolved
+      if (binding.displayHint) return binding.displayHint
+      if (binding.relativePath) {
+        return `Volume {${binding.volumeGuid}} / ${binding.relativePath}`
+      }
+      return `Volume {${binding.volumeGuid}}`
+    }
+
+    function applyShareRootsToConfig() {
       if (!config.value) return
-      const cleaned = shareDirs.value.map((d) => d.trim()).filter((d) => d.length > 0)
-      config.value.remoteManagementDirs = cleaned
-      config.value.remoteManagementDir = cleaned[0] ?? ''
+      const cleaned = shareRoots.value.filter((b) => !isBindingEmpty(b))
+      config.value.remoteManagementShareRoots = cleaned
     }
 
     async function refreshStatus() {
@@ -54,7 +80,10 @@ export default defineComponent({
         if (config.value.remoteManagementShareSlots == null) {
           config.value.remoteManagementShareSlots = 3
         }
-        syncShareDirsFromConfig()
+        if (!config.value.remoteManagementShareRoots) {
+          config.value.remoteManagementShareRoots = []
+        }
+        syncShareRootsFromConfig()
         await refreshStatus()
       } catch (err) {
         config.value = null
@@ -67,7 +96,7 @@ export default defineComponent({
 
     async function save(silent = false) {
       if (!config.value) return
-      applyShareDirsToConfig()
+      applyShareRootsToConfig()
       config.value.remoteManagementShareSlots = clampSlots(
         config.value.remoteManagementShareSlots ?? 3,
       )
@@ -95,7 +124,7 @@ export default defineComponent({
     }
 
     watch(
-      shareDirs,
+      shareRoots,
       () => {
         if (loading.value) return
         scheduleAutoSave()
@@ -110,7 +139,7 @@ export default defineComponent({
         config.value.remoteManagementShareSlots = clampSlots(
           config.value.remoteManagementShareSlots ?? 3,
         )
-        syncShareDirsFromConfig()
+        syncShareRootsFromConfig()
         scheduleAutoSave()
       },
     )
@@ -129,18 +158,24 @@ export default defineComponent({
     async function pickShareDir(index: number) {
       if (!config.value) return
       const picked = await open({ directory: true, multiple: false })
-      if (typeof picked === 'string' && picked.length > 0) {
-        const next = [...shareDirs.value]
-        while (next.length <= index) next.push('')
-        next[index] = picked
-        shareDirs.value = next
+      if (typeof picked !== 'string' || picked.length === 0) return
+
+      const result = await commands.bindShareRootPath(picked)
+      if (result.status !== 'ok') {
+        message.value = result.error.err_message || '綁定分享路徑失敗'
+        return
       }
+
+      const next = [...shareRoots.value]
+      while (next.length <= index) next.push({ ...EMPTY_BINDING })
+      next[index] = result.data.binding
+      shareRoots.value = next
     }
 
     function clearShareDir(index: number) {
-      const next = [...shareDirs.value]
-      next[index] = ''
-      shareDirs.value = next
+      const next = [...shareRoots.value]
+      next[index] = { ...EMPTY_BINDING }
+      shareRoots.value = next
     }
 
     onMounted(async () => {
@@ -197,13 +232,13 @@ export default defineComponent({
                 <span style="color:#888;font-size:12px;">（多個時，手機根目錄會列出各分享名稱）</span>
               </div>
 
-              {shareDirs.value.map((dir, index) => (
+              {shareRoots.value.map((binding, index) => (
                 <div
                   key={index}
                   style="display:grid;grid-template-columns:1fr auto auto;gap:8px;margin-bottom:8px;align-items:center;"
                 >
                   <input
-                    value={dir || '（未指定）'}
+                    value={shareRootLabel(index)}
                     readonly
                     style="padding:8px 10px;border-radius:8px;border:1px solid #444;background:#121212;color:#e8e8e8;"
                   />
@@ -211,7 +246,7 @@ export default defineComponent({
                     指定 #{index + 1}
                   </button>
                   <button
-                    disabled={!dir}
+                    disabled={isBindingEmpty(binding)}
                     onClick={() => clearShareDir(index)}
                     style="padding:8px 12px;"
                   >
@@ -221,7 +256,7 @@ export default defineComponent({
               ))}
 
               <p style="margin:0 0 10px;font-size:12px;color:#888;">
-                更換路徑後會自動儲存；若服務已在執行，請按「重新啟動服務」套用新分享目錄。
+                分享路徑以 Volume GUID 綁定，磁碟代號變更後仍可還原。更換路徑後會自動儲存；若服務已在執行，請按「重新啟動服務」。
               </p>
 
               <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap;">

@@ -71,6 +71,19 @@ export function getBackgroundPlaybackSession() {
   return invoke<string | null>('get_background_playback_session')
 }
 
+export type VideoPlaybackProgress = {
+  positionMs: number
+  durationMs: number
+}
+
+export function getVideoPlaybackProgress(host: string, port: number, relPath: string) {
+  return invoke<VideoPlaybackProgress>('get_video_playback_progress', {
+    host,
+    port,
+    relPath,
+  })
+}
+
 export function stopVideoPlayback() {
   return invoke<void>('stop_video_playback')
 }
@@ -176,6 +189,8 @@ export type RemotePcDirEntry = {
   displayName?: string | null
   isDir: boolean
   size: number | null
+  diskFreeBytes?: number | null
+  diskTotalBytes?: number | null
 }
 
 export type RemotePcBrowseResult = {

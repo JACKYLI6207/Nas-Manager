@@ -180,6 +180,39 @@ pub fn stop_video_playback(app: AppHandle) -> CommandResult<()> {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct VideoPlaybackProgress {
+    pub position_ms: i64,
+    pub duration_ms: i64,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn get_video_playback_progress(
+    app: AppHandle,
+    host: String,
+    port: u16,
+    rel_path: String,
+) -> CommandResult<VideoPlaybackProgress> {
+    #[cfg(target_os = "android")]
+    {
+        let player = local_video_player(&app)?;
+        let p = player.get_video_playback_progress(&host, port, &rel_path)?;
+        return Ok(VideoPlaybackProgress {
+            position_ms: p.position_ms,
+            duration_ms: p.duration_ms,
+        });
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (app, host, port, rel_path);
+        Ok(VideoPlaybackProgress {
+            position_ms: 0,
+            duration_ms: 0,
+        })
+    }
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn get_background_playback_session(app: AppHandle) -> CommandResult<Option<String>> {

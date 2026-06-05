@@ -32,6 +32,20 @@ pub struct PlayVideoResult {
     pub background: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+pub struct VideoPlaybackProgress {
+    pub position_ms: i64,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct VideoProgressResponse {
+    #[serde(default, rename = "positionMs")]
+    position_ms: i64,
+    #[serde(default, rename = "durationMs")]
+    duration_ms: i64,
+}
+
 #[derive(Debug, Deserialize)]
 struct BackgroundSessionResponse {
     #[serde(default, rename = "sessionJson")]
@@ -172,6 +186,38 @@ impl<R: Runtime> LocalVideoPlayer<R> {
         Ok(res
             .session_json
             .filter(|s| !s.trim().is_empty()))
+    }
+
+    pub fn get_video_playback_progress(
+        &self,
+        host: &str,
+        port: u16,
+        rel_path: &str,
+    ) -> crate::errors::CommandResult<VideoPlaybackProgress> {
+        #[derive(serde::Serialize)]
+        struct Payload<'a> {
+            host: &'a str,
+            port: u16,
+            #[serde(rename = "relPath")]
+            rel_path: &'a str,
+        }
+        let res = self
+            .try_handle()
+            .ok_or_else(|| {
+                crate::errors::CommandError::from(
+                    "影片播放不可用",
+                    anyhow::anyhow!("LocalVideoPlugin 未載入"),
+                )
+            })?
+            .run_mobile_plugin::<VideoProgressResponse>(
+                "getVideoPlaybackProgress",
+                Payload { host, port, rel_path },
+            )
+            .map_err(|e| crate::errors::CommandError::from("讀取播放進度失敗", e))?;
+        Ok(VideoPlaybackProgress {
+            position_ms: res.position_ms.max(0),
+            duration_ms: res.duration_ms.max(0),
+        })
     }
 
     pub fn sync_stream_playlist(

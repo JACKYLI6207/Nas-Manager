@@ -22,6 +22,14 @@ import {
 } from '../streamPlaylistStorage'
 import StreamPlaylistList from './StreamPlaylistList.vue'
 import {
+  formatVideoStreamProgressLabel,
+  hasVideoStreamRecord,
+  markVideoStreamOpened,
+  syncVideoStreamProgressFromNative,
+  syncVideoStreamProgressList,
+  videoStreamProgressRatio,
+} from '../videoStreamProgress'
+import {
   acquireStreamPlaybackLock,
   activateStreamQueueJob,
   clearCurrentStreamQueue,
@@ -73,6 +81,32 @@ const videoSubTabs: { key: VideoSubTab; label: string }[] = [
 const videoSubTab = ref<VideoSubTab>('home')
 const favoritePlaylists = ref<FavoriteStreamPlaylist[]>([])
 const expandedFavoriteIds = ref<Set<string>>(new Set())
+/** 觸發串流列表進度 UI 更新 */
+const videoProgressTick = ref(0)
+
+function videoProgressLabel(job: RemoteStreamJob): string | null {
+  void videoProgressTick.value
+  return formatVideoStreamProgressLabel(job)
+}
+
+function videoOpenedMark(job: RemoteStreamJob): boolean {
+  void videoProgressTick.value
+  return hasVideoStreamRecord(job)
+}
+
+function videoProgressRatioForJob(job: RemoteStreamJob): number | null {
+  void videoProgressTick.value
+  return videoStreamProgressRatio(job)
+}
+
+async function refreshVideoStreamProgress() {
+  const jobs: RemoteStreamJob[] = [...fullStreamQueue.value]
+  for (const pl of favoritePlaylists.value) {
+    jobs.push(...pl.jobs)
+  }
+  await syncVideoStreamProgressList(jobs)
+  videoProgressTick.value += 1
+}
 
 function reloadFavoritePlaylists() {
   favoritePlaylists.value = loadFavoriteStreamPlaylists()
@@ -82,6 +116,9 @@ function setVideoSubTab(tab: VideoSubTab) {
   videoSubTab.value = tab
   if (tab === 'favorites') {
     reloadFavoritePlaylists()
+  }
+  if (tab === 'current' || tab === 'favorites') {
+    void refreshVideoStreamProgress()
   }
 }
 
@@ -291,6 +328,7 @@ async function openLocalVideo() {
 async function playStreamJob(job: RemoteStreamJob) {
   if (!acquireStreamPlaybackLock()) return
   setCurrentStreamJob(job)
+  markVideoStreamOpened(job)
   await syncNativeStreamPlaylist()
   status.value = `正在串流：${job.title}`
   streamLog(`開始播放：${job.relPath}`)
@@ -331,6 +369,8 @@ async function playStreamJob(job: RemoteStreamJob) {
     playbackErr = err
   } finally {
     releaseStreamPlaybackLock()
+    await syncVideoStreamProgressFromNative(job)
+    videoProgressTick.value += 1
     if (!pausedInBackground && !playbackErr && !backgroundSession.value) {
       const next = shiftNextStreamJob()
       if (next) {
@@ -571,6 +611,7 @@ async function copyStreamLog() {
 function onDocumentVisibilityForSession() {
   if (document.visibilityState === 'visible') {
     void refreshBackgroundSession()
+    void refreshVideoStreamProgress()
   }
 }
 
@@ -583,6 +624,7 @@ onMounted(() => {
 
 onActivated(() => {
   void refreshBackgroundSession()
+  void refreshVideoStreamProgress()
   window.setTimeout(() => {
     void refreshBackgroundSession()
   }, 300)
@@ -750,6 +792,9 @@ onBeforeUnmount(() => {
           fill
           :jobs="fullStreamQueue"
           :current-key="currentJobKey"
+          :progress-for-job="videoProgressLabel"
+          :progress-ratio-for-job="videoProgressRatioForJob"
+          :opened-for-job="videoOpenedMark"
           empty-text="尚無項目；請於遠端管理勾選影片後「串流播放」"
           @play="onPickQueueJob"
         />
@@ -809,6 +854,9 @@ onBeforeUnmount(() => {
             <StreamPlaylistList
               fill
               :jobs="pl.jobs"
+              :progress-for-job="videoProgressLabel"
+              :progress-ratio-for-job="videoProgressRatioForJob"
+              :opened-for-job="videoOpenedMark"
               show-remove
               @play="(job) => onPickFavoriteQueueJob(pl, job)"
               @remove="(job) => (favoritePlaylists = removeFavoriteStreamPlaylistItem(pl.id, job))"

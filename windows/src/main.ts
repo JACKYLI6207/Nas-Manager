@@ -1,8 +1,8 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import App from './AppRemote.tsx'
+import App from './App.vue'
 import 'virtual:uno.css'
-import './global.css'
+import './styles/global.css'
 
 const pinia = createPinia()
 const app = createApp(App)

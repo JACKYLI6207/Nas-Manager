@@ -12,6 +12,23 @@ fn default_remote_share_slots() -> u32 {
     3
 }
 
+/// 分享根目錄：綁定 Volume GUID，磁碟代號變更後仍可還原。
+#[derive(Debug, Clone, Serialize, Deserialize, Type, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ShareRootBinding {
+    pub volume_guid: String,
+    #[serde(default)]
+    pub relative_path: String,
+    #[serde(default)]
+    pub display_hint: String,
+}
+
+impl ShareRootBinding {
+    pub fn is_empty(&self) -> bool {
+        self.volume_guid.trim().is_empty()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
@@ -49,6 +66,9 @@ pub struct Config {
     /// 多個分享根目錄（空則 fallback remote_management_dir / download_dir）
     #[serde(default)]
     pub remote_management_dirs: Vec<PathBuf>,
+    /// Volume GUID 綁定（優先於 dirs；不受磁碟代號變更影響）
+    #[serde(default)]
+    pub remote_management_share_roots: Vec<ShareRootBinding>,
     /// 遠端管理 HTTP 埠（預設 8765）
     pub remote_management_port: u16,
     /// 遠端管理存取 Token（啟用時自動產生）
@@ -150,6 +170,7 @@ impl Config {
             remote_management_dir: PathBuf::new(),
             remote_management_share_slots: default_remote_share_slots(),
             remote_management_dirs: Vec::new(),
+            remote_management_share_roots: Vec::new(),
             remote_management_port: 8765,
             remote_management_token: String::new(),
             remote_management_display_name: String::new(),

@@ -39,7 +39,7 @@ use crate::{
     extensions::AppHandleExt,
     local_reader,
     share_roots::{
-        build_share_mounts, mounts_fingerprint, share_dirs_display, ShareMount,
+        build_share_mounts, share_dirs_display, ShareMount,
     },
 };
 
@@ -231,6 +231,12 @@ struct RemoteDirEntry {
     pub display_name: Option<String>,
     pub is_dir: bool,
     pub size: Option<u64>,
+    /// 根目錄分享磁碟：可用空間（bytes）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_free_bytes: Option<u64>,
+    /// 根目錄分享磁碟：總容量（bytes）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_total_bytes: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -312,12 +318,12 @@ pub fn clear_last_error() {
 }
 
 fn remote_fingerprint(config: &Config) -> String {
-    let mounts = build_share_mounts(config).unwrap_or_default();
+    let mount_fp = crate::share_roots::config_mounts_fingerprint(config);
     format!(
         "{}|{}|{}|{}",
         env!("CARGO_PKG_VERSION"),
         config.remote_management_port,
-        mounts_fingerprint(&mounts),
+        mount_fp,
         effective_display_name(config)
     )
 }
@@ -812,7 +818,7 @@ async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> 
         ok: true,
         app: "Nas Manager",
         version: env!("CARGO_PKG_VERSION"),
-        remote_api: 8,
+        remote_api: 9,
         share_mounts,
     })
 }
@@ -951,11 +957,21 @@ fn list_directory_entries(dir: &Path) -> anyhow::Result<Vec<RemoteDirEntry>> {
             continue;
         }
         let meta = entry.metadata()?;
+        let child_path = entry.path();
+        let size = if meta.is_file() {
+            Some(meta.len())
+        } else if meta.is_dir() {
+            Some(directory_contents_size(&child_path))
+        } else {
+            None
+        };
         entries.push(RemoteDirEntry {
             name,
             display_name: None,
             is_dir: meta.is_dir(),
-            size: if meta.is_file() { Some(meta.len()) } else { None },
+            size,
+            disk_free_bytes: None,
+            disk_total_bytes: None,
         });
     }
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
@@ -964,6 +980,60 @@ fn list_directory_entries(dir: &Path) -> anyhow::Result<Vec<RemoteDirEntry>> {
         _ => compare_entry_name(&a.name, &b.name),
     });
     Ok(entries)
+}
+
+/// 資料夾內所有檔案大小加總（含子資料夾，不含資料夾本身 metadata）。
+fn directory_contents_size(dir: &Path) -> u64 {
+    let mut total = 0u64;
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if meta.is_file() {
+            total += meta.len();
+        } else if meta.is_dir() {
+            total += directory_contents_size(&path);
+        }
+    }
+    total
+}
+
+#[cfg(windows)]
+fn query_disk_space(path: &Path) -> (Option<u64>, Option<u64>) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut free_avail = 0u64;
+    let mut total = 0u64;
+    let mut total_free = 0u64;
+    unsafe {
+        if GetDiskFreeSpaceExW(
+            PCWSTR(wide.as_ptr()),
+            Some(&mut free_avail),
+            Some(&mut total),
+            Some(&mut total_free),
+        )
+        .is_ok()
+        {
+            return (Some(free_avail), Some(total));
+        }
+    }
+    (None, None)
+}
+
+#[cfg(not(windows))]
+fn query_disk_space(_path: &Path) -> (Option<u64>, Option<u64>) {
+    (None, None)
 }
 
 fn collect_files_under(
@@ -1028,11 +1098,16 @@ async fn serve_browse(
         let mut entries: Vec<RemoteDirEntry> = state
             .mounts
             .iter()
-            .map(|m| RemoteDirEntry {
-                name: m.label.clone(),
-                display_name: Some(m.display.clone()),
-                is_dir: true,
-                size: None,
+            .map(|m| {
+                let (disk_free_bytes, disk_total_bytes) = query_disk_space(&m.root);
+                RemoteDirEntry {
+                    name: m.label.clone(),
+                    display_name: Some(m.display.clone()),
+                    is_dir: true,
+                    size: None,
+                    disk_free_bytes,
+                    disk_total_bytes,
+                }
             })
             .collect();
         entries.sort_by(|a, b| compare_entry_name(&a.name, &b.name));
@@ -1048,15 +1123,18 @@ async fn serve_browse(
             let (mount, _) = state
                 .resolve_mount_and_inner(rel_path)
                 .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
-            match list_directory_entries(&dir) {
-                Ok(entries) => Ok(Json(BrowseResponse {
-                    ok: true,
-                    path: state.api_path_for(mount, &dir),
-                    path_display: Some(state.display_path_for(mount, &dir)),
-                    entries,
-                })),
-                Err(err) => Err((StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
-            }
+            let api_path = state.api_path_for(mount, &dir);
+            let path_display = state.display_path_for(mount, &dir);
+            let entries = tokio::task::spawn_blocking(move || list_directory_entries(&dir))
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            Ok(Json(BrowseResponse {
+                ok: true,
+                path: api_path,
+                path_display: Some(path_display),
+                entries,
+            }))
         }
         Err(err) => Err((StatusCode::BAD_REQUEST, err.to_string())),
     }

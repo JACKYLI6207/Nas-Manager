@@ -38,13 +38,22 @@ object VideoProgressStore {
     }
 
     fun load(context: Context, storageKey: String): Long {
-        if (storageKey == "unknown") return 0L
+        return loadRecord(context, storageKey).first
+    }
+
+    fun loadDuration(context: Context, storageKey: String): Long {
+        return loadRecord(context, storageKey).second
+    }
+
+    /** @return positionMs to durationMs (both 0 if none / finished) */
+    fun loadRecord(context: Context, storageKey: String): Pair<Long, Long> {
+        if (storageKey == "unknown") return 0L to 0L
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val pos = prefs.getLong("$storageKey|pos", 0L)
         val dur = prefs.getLong("$storageKey|dur", 0L)
-        if (pos <= 0L) return 0L
-        if (dur > 0L && pos >= dur - 3000L) return 0L
-        return pos
+        if (pos <= 0L) return 0L to dur.coerceAtLeast(0L)
+        if (dur > 0L && pos >= dur - 3000L) return 0L to 0L
+        return pos to dur.coerceAtLeast(0L)
     }
 
     fun clear(context: Context, storageKey: String) {

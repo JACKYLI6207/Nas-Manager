@@ -59,6 +59,10 @@ pub struct RemotePcDirEntry {
     pub display_name: Option<String>,
     pub is_dir: bool,
     pub size: Option<u64>,
+    #[serde(default)]
+    pub disk_free_bytes: Option<u64>,
+    #[serde(default)]
+    pub disk_total_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
