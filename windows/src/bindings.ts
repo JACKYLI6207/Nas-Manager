@@ -1,5 +1,7 @@
 // Minimal tauri-specta bindings for Nas Manager Windows PC companion (remote management only).
 
+import { invoke as TAURI_INVOKE } from '@tauri-apps/api/core'
+
 export const commands = {
   async getConfig(): Promise<Config> {
     return await TAURI_INVOKE('get_config')
@@ -75,5 +77,3 @@ export type RemoteManagementStatus = {
 export type DownloadFormat = 'JpegZipPack' | 'Server2Zip'
 export type ProxyMode = 'System' | 'NoProxy' | 'Custom'
 export type ApiDomainMode = 'Default' | 'Custom'
-
-declare function TAURI_INVOKE<T>(cmd: string, args?: Record<string, unknown>): Promise<T>

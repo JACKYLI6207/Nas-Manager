@@ -16,6 +16,8 @@ if ($Full) { $Mode = 'Full' }
 $ErrorActionPreference = 'Stop'
 
 $ProjectRoot = $PSScriptRoot
+# 簽章 APK 一律輸出至 Nas-Manager 倉庫根目錄（非 android/ 子目錄）
+$RepoRoot = Split-Path $ProjectRoot -Parent
 $AndroidGradle = Join-Path $ProjectRoot 'src-tauri\gen\android'
 $ApkOutDir = Join-Path $AndroidGradle 'app\build\outputs\apk\universal\release'
 $UnsignedApk = Join-Path $ApkOutDir 'app-universal-release-unsigned.apk'
@@ -30,7 +32,7 @@ if (Test-Path $pkgJson) {
     if ($pkg.version) { $version = $pkg.version }
 }
 $apkSuffix = if ($IsFastBuild) { '-fast' } else { '' }
-$OutputApk = Join-Path $ProjectRoot "Nas-Manager-Android-v$version$apkSuffix.apk"
+$OutputApk = Join-Path $RepoRoot "Nas-Manager-Android-v$version$apkSuffix.apk"
 
 # 快速：只編 arm64 Rust + 單 ABI，Gradle 用 daemon；完整：四 ABI + --no-daemon
 $script:GradleExtraProps = @()
@@ -290,10 +292,10 @@ $signSec = Invoke-CommandWithProgress -PhaseName 'Sign' {
     & $apksigner verify --verbose $OutputApk | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'apksigner verify 失敗' }
 
-    Get-ChildItem (Join-Path $ProjectRoot 'Nas-Manager-Android-v*.apk.idsig') -ErrorAction SilentlyContinue |
+    Get-ChildItem (Join-Path $RepoRoot 'Nas-Manager-Android-v*.apk.idsig') -ErrorAction SilentlyContinue |
         Remove-Item -Force -ErrorAction SilentlyContinue
     if ($IsFastBuild) {
-        $fullApk = Join-Path $ProjectRoot "Nas-Manager-Android-v$version.apk"
+        $fullApk = Join-Path $RepoRoot "Nas-Manager-Android-v$version.apk"
         if ((Test-Path $fullApk) -and ($fullApk -ne $OutputApk)) {
             Write-Host "提示：完整版仍為 $fullApk" -ForegroundColor DarkGray
         }

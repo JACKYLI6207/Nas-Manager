@@ -60,6 +60,11 @@ const renameDialogInput = ref('')
 const renameDialogPath = ref('')
 const renameDialogIsDir = ref(false)
 const renameInputRef = ref<HTMLInputElement | null>(null)
+const mkdirDialogOpen = ref(false)
+const mkdirDialogInput = ref('')
+const mkdirInputRef = ref<HTMLInputElement | null>(null)
+const deleteDialogOpen = ref(false)
+const deleteDialogPaths = ref<string[]>([])
 const uploadConflictOpen = ref(false)
 const uploadConflictList = ref<string[]>([])
 let pendingUploadConflictResolve: ((policy: RemoteUploadConflictPolicy | null) => void) | null =
@@ -85,6 +90,8 @@ const VIDEO_EXTENSIONS = new Set([
   'm2ts',
   'flv',
   'wmv',
+  'rmvb',
+  'rm',
 ])
 
 function isVideoFile(name: string): boolean {
@@ -615,15 +622,24 @@ async function runFileOp(action: RemotePcFileOpAction) {
     return
   }
 
+  if (action === 'mkdir') {
+    openMkdirDialog()
+    return
+  }
+
+  if (action === 'delete') {
+    if (paths.length === 0) {
+      showFlashHint('請先勾選要刪除的項目')
+      return
+    }
+    deleteDialogPaths.value = paths
+    deleteDialogOpen.value = true
+    return
+  }
+
   remoteBusy.value = true
   try {
-    if (action === 'delete') {
-      if (paths.length === 0) {
-        showFlashHint('請先勾選要刪除的項目')
-        return
-      }
-      if (!window.confirm(`確定刪除 PC 上 ${paths.length} 項？此操作無法復原。`)) return
-    } else if (action === 'paste') {
+    if (action === 'paste') {
       // 貼上至目前 PC 目錄
     } else if (paths.length === 0) {
       showFlashHint('請先勾選項目')
@@ -668,6 +684,92 @@ function openRenameDialog(relPath: string) {
 function cancelRenameDialog() {
   renameDialogOpen.value = false
   renameDialogPath.value = ''
+}
+
+function openMkdirDialog() {
+  mkdirDialogInput.value = ''
+  mkdirDialogOpen.value = true
+  void nextTick(() => {
+    const el = mkdirInputRef.value
+    if (!el) return
+    el.focus()
+  })
+}
+
+function cancelMkdirDialog() {
+  mkdirDialogOpen.value = false
+  mkdirDialogInput.value = ''
+}
+
+async function confirmMkdirDialog() {
+  if (!host.value || remoteBusy.value) return
+  const name = mkdirDialogInput.value.trim()
+  if (!name || name === '.' || name === '..') {
+    showFlashHint('資料夾名稱不可為空')
+    return
+  }
+  if (/[\\/]/.test(name)) {
+    showFlashHint('名稱不可含 / 或 \\')
+    return
+  }
+  mkdirDialogOpen.value = false
+  remoteBusy.value = true
+  try {
+    const result = await remotePcFileOp(
+      host.value,
+      props.pc.port,
+      'mkdir',
+      [],
+      currentPath.value,
+      name,
+    )
+    await loadDirectory(currentPath.value)
+    showFlashHint(result.message)
+  } catch (e) {
+    showFlashHint(formatInvokeError(e), 2800)
+  } finally {
+    remoteBusy.value = false
+  }
+}
+
+function cancelDeleteDialog() {
+  deleteDialogOpen.value = false
+  deleteDialogPaths.value = []
+}
+
+async function confirmDeleteDialog(recycle: boolean) {
+  if (!host.value || remoteBusy.value) return
+  const paths = deleteDialogPaths.value
+  if (paths.length === 0) {
+    cancelDeleteDialog()
+    return
+  }
+  deleteDialogOpen.value = false
+  deleteDialogPaths.value = []
+  remoteBusy.value = true
+  const action = recycle ? 'delete_recycle' : 'delete_permanent'
+  try {
+    const result = await remotePcFileOp(
+      host.value,
+      props.pc.port,
+      action,
+      paths,
+      currentPath.value,
+      '',
+    )
+    selectedItems.value = new Map()
+    await loadDirectory(currentPath.value)
+    showFlashHint(result.message)
+  } catch (e) {
+    const err = formatInvokeError(e)
+    if (recycle && /delete_recycle|未知|unsupported|不支援/i.test(err)) {
+      showFlashHint('PC 配套端需更新為支援資源回收桶的版本，或改選「永久刪除」。', 3200)
+    } else {
+      showFlashHint(err, 2800)
+    }
+  } finally {
+    remoteBusy.value = false
+  }
 }
 
 async function confirmRenameDialog() {
@@ -731,12 +833,19 @@ onBeforeUnmount(() => {
   }
 })
 
+function pcIdentity(pc: RemotePcListItem): string {
+  const h = pc.connectedHost ?? pc.hosts[0] ?? ''
+  return `${h}:${pc.port}`
+}
+
 watch(
-  () => props.pc,
-  () => {
-    currentPath.value = ''
-    selectedItems.value = new Map()
-    void loadDirectory('')
+  () => pcIdentity(props.pc),
+  (nextId, prevId) => {
+    if (prevId !== undefined && nextId !== prevId) {
+      currentPath.value = ''
+      selectedItems.value = new Map()
+      void loadDirectory('')
+    }
   },
 )
 </script>
@@ -801,6 +910,9 @@ watch(
               >
                 重新命名
               </button>
+              <button type="button" :disabled="remoteBusy" @click="runFileOp('mkdir')">
+                新建資料夾
+              </button>
             </div>
           </div>
         </div>
@@ -854,7 +966,7 @@ watch(
         <span class="remote-browse-pc">{{ displayPcName }}</span>
         <span class="remote-browse-path">{{ pathLabel }}</span>
         <span class="remote-browse-hint"
-          >勾選後「操作」剪下/複製/貼上/刪除/重新命名；「傳輸」上傳/下載；勾選 ZIP/CBZ 後「串流 →
+          >勾選後「操作」剪下/複製/貼上/刪除/重新命名/新建資料夾；「傳輸」上傳/下載；勾選 ZIP/CBZ 後「串流 →
           串流閱讀」、勾選影片後「串流 → 串流播放」（漫畫閱讀需 PC remote_api≥8）</span
         >
       </div>
@@ -960,6 +1072,45 @@ watch(
             都保留
           </button>
           <button type="button" class="tool tool--ghost" @click="cancelUploadConflict">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="deleteDialogOpen" class="remote-upload-conflict-overlay" @click.self="cancelDeleteDialog">
+      <div class="remote-upload-conflict-panel" @click.stop>
+        <p class="remote-upload-conflict-title">刪除確認</p>
+        <p class="remote-upload-conflict-hint">
+          將刪除 PC 上 {{ deleteDialogPaths.length }} 項，請選擇刪除方式：
+        </p>
+        <div class="remote-upload-conflict-actions remote-delete-actions">
+          <button type="button" class="tool tool--primary" @click="confirmDeleteDialog(true)">
+            移至資源回收桶
+          </button>
+          <button type="button" class="tool tool--ghost" @click="confirmDeleteDialog(false)">
+            永久刪除
+          </button>
+          <button type="button" class="tool tool--ghost" @click="cancelDeleteDialog">取消</button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="mkdirDialogOpen" class="remote-upload-conflict-overlay" @click.self="cancelMkdirDialog">
+      <div class="remote-upload-conflict-panel remote-rename-panel" @click.stop>
+        <p class="remote-upload-conflict-title">新建資料夾</p>
+        <p class="remote-upload-conflict-hint">將在目前 PC 目錄建立資料夾：{{ pathLabel }}</p>
+        <input
+          ref="mkdirInputRef"
+          v-model="mkdirDialogInput"
+          class="remote-rename-input"
+          type="text"
+          maxlength="255"
+          autocomplete="off"
+          placeholder="資料夾名稱"
+          @keydown.enter.prevent="confirmMkdirDialog"
+        />
+        <div class="remote-upload-conflict-actions">
+          <button type="button" class="tool tool--primary" @click="confirmMkdirDialog">建立</button>
+          <button type="button" class="tool tool--ghost" @click="cancelMkdirDialog">取消</button>
         </div>
       </div>
     </div>
@@ -1238,6 +1389,21 @@ watch(
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.remote-delete-actions {
+  flex-wrap: nowrap;
+  align-items: stretch;
+}
+
+.remote-delete-actions .tool {
+  flex: 1 1 0;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.remote-delete-actions .tool:last-child {
+  flex: 0 0 auto;
 }
 
 .remote-rename-panel {

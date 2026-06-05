@@ -337,6 +337,87 @@ object SubtitleCharsetHelper {
         return blob.contains("中文") || blob.contains("chinese") || blob.contains("中國")
     }
 
+    fun isChineseSubtitleName(name: String): Boolean {
+        val blob = name.lowercase()
+        if (blob.contains("中文") || blob.contains("chinese") || blob.contains("mandarin") || blob.contains("cantonese")) {
+            return true
+        }
+        if (blob.contains("简体") || blob.contains("簡體") || blob.contains("繁体") || blob.contains("繁體")) {
+            return true
+        }
+        return blob.contains("zh") || CHINESE_LANG_CODES.any { blob.contains(it) }
+    }
+
+    fun localizeVlcTrackName(name: String): String {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty()) return "字幕"
+        if (trimmed.any { it.code >= 0x4E00 }) return trimmed
+        val lower = trimmed.lowercase()
+        return when {
+            lower == "disable" -> "關閉字幕"
+            lower.contains("chinese") && lower.contains("simp") -> "中文"
+            lower.contains("chinese") && lower.contains("trad") -> "中文"
+            lower.contains("chinese") -> "中文"
+            lower.startsWith("subtitle ") -> "字幕 ${trimmed.substringAfter(" ").trim()}"
+            lower.startsWith("track ") -> "字幕 ${trimmed.substringAfter(" ").trim()}"
+            lower.startsWith("spu ") -> "字幕 ${trimmed.substringAfter(" ").trim()}"
+            else -> trimmed
+        }
+    }
+
+    fun resolveScriptFromTrackName(name: String): String? {
+        val blob = name.lowercase()
+        when {
+            blob.contains("hans") || blob.contains("simp") || blob.contains("简体") ||
+                blob.contains("简中") || blob.contains("gb") || blob.contains("chs") ||
+                blob.contains("sc") || blob.contains("zh-cn") || blob.contains("zh_cn") ||
+                blob.contains("zh-sg") || blob.contains("simplified") ->
+                return "簡體"
+            blob.contains("hant") || blob.contains("trad") || blob.contains("繁體") ||
+                blob.contains("繁体") || blob.contains("繁中") || blob.contains("big5") ||
+                blob.contains("cht") || blob.contains("tc") || blob.contains("zh-tw") ||
+                blob.contains("zh_tw") || blob.contains("zh-hk") || blob.contains("taiwan") ||
+                blob.contains("traditional") || blob.contains("cantonese") && blob.contains("trad") ->
+                return "繁體"
+        }
+        return when (detectChineseScript(name)) {
+            ChineseScript.SIMPLIFIED -> "簡體"
+            ChineseScript.TRADITIONAL -> "繁體"
+            ChineseScript.UNKNOWN -> null
+        }
+    }
+
+    fun vlcSpuTrackDisplayName(
+        rawName: String,
+        trackId: Int,
+        chineseTrackIds: List<Int>,
+    ): String {
+        val localized = localizeVlcTrackName(rawName)
+        if (!isChineseSubtitleName("$rawName $localized")) return localized
+        if (localized.contains("簡體") || localized.contains("繁體") ||
+            localized.contains("简体") || localized.contains("繁体")
+        ) {
+            return localized
+        }
+        resolveScriptFromTrackName(rawName)?.let { script ->
+            return "$localized ($script)"
+        }
+        val ord = chineseTrackIds.indexOf(trackId)
+        val count = chineseTrackIds.size
+        val script =
+            when {
+                count <= 1 -> "繁體"
+                count == 2 -> if (ord == 0) "簡體" else "繁體"
+                else ->
+                    when (ord) {
+                        0 -> "簡體"
+                        1 -> "繁體"
+                        else -> "繁體"
+                    }
+            }
+        return "$localized ($script)"
+    }
+
     fun resolveScriptFromMetadata(format: androidx.media3.common.Format): String? {
         val blob =
             buildString {

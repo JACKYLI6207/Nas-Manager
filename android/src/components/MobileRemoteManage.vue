@@ -178,6 +178,11 @@ async function connectFavoritePcsFirst(): Promise<number> {
   return ok
 }
 
+function pcIdentity(pc: RemotePcListItem): string {
+  const h = pc.connectedHost ?? pc.hosts[0] ?? ''
+  return `${h}:${pc.port}`
+}
+
 function syncBrowsePcFromList() {
   const cur = browsePc.value
   if (!cur) return
@@ -191,16 +196,23 @@ function syncBrowsePcFromList() {
         p.hosts.includes(host) ||
         (cur.connectedHost != null && p.hosts.includes(cur.connectedHost))),
   )
-  if (updated) {
-    browsePc.value = { ...updated, name: displayNameForPc(updated) }
+  if (!updated) return
+  const displayName = displayNameForPc(updated)
+  if (pcIdentity(cur) === pcIdentity(updated)) {
+    Object.assign(cur, updated, { name: displayName })
+    return
   }
+  browsePc.value = { ...updated, name: displayName }
 }
 
 async function refreshList(options?: { resetBrowse?: boolean }) {
   const gen = ++scanGeneration
+  const browsing = browsePc.value != null
   const preservedConnected = pcs.value.filter((p) => p.connected === true)
   scanning.value = true
-  status.value = '正在掃描區網內的 PC…'
+  if (!browsing) {
+    status.value = '正在掃描區網內的 PC…'
+  }
   pcs.value = [...preservedConnected]
   if (options?.resetBrowse) {
     browsePc.value = null
@@ -277,8 +289,10 @@ async function refreshList(options?: { resetBrowse?: boolean }) {
     if (gen !== scanGeneration) return
     appendLog('連線測試', testLines)
     const okCount = pcs.value.filter((p) => p.connected === true).length
-    status.value = `掃描完成：${okCount} / ${pcs.value.length} 台能連線`
-    showScanLog.value = okCount === 0
+    if (!browsing) {
+      status.value = `掃描完成：${okCount} / ${pcs.value.length} 台能連線`
+      showScanLog.value = okCount === 0
+    }
     syncBrowsePcFromList()
   } catch (e) {
     if (gen !== scanGeneration) return

@@ -12,6 +12,7 @@ import android.view.SurfaceView
 import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.CheckBox
@@ -32,6 +33,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.media3.common.C
+import androidx.media3.common.Effect
 import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MimeTypes
@@ -53,10 +55,12 @@ import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.exoplayer.upstream.DefaultBandwidthMeter
 import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.ui.DefaultTrackNameProvider
+import androidx.media3.ui.PlayerControlView
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
 import androidx.media3.ui.R as Media3UiR
 import androidx.media3.ui.TrackSelectionDialogBuilder
+import org.videolan.libvlc.util.VLCVideoLayout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -91,9 +95,13 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     private var statusBarInsetTop = 0
     private var uiChromeVisible = false
     private var playerViewRef: PlayerView? = null
+    private var controlsRootRef: View? = null
+    private var vlcControlRef: PlayerControlView? = null
+    private var vlcTapCatcherRef: View? = null
     private val videoBrightnessMatrix = VideoBrightnessMatrix()
     private var pinchZoomHelper: VideoPinchZoomHelper? = null
     private var subtitleDragHelper: SubtitleDragHelper? = null
+    private var vlcSubtitleDragHelper: VlcSubtitleDragHelper? = null
     private var isRemoteStreamPlayback = false
     private var simpToTradEnabled = false
     private val progressSaveHandler = Handler(Looper.getMainLooper())
@@ -112,6 +120,9 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     private var streamPlaylistPanel: ScrollView? = null
     private var streamPlaylistListHost: LinearLayout? = null
     private var streamPlaylistOpen = false
+    private var vlcSession: NasVlcPlayerSession? = null
+    private var vlcBindingPlayer: VlcBindingPlayer? = null
+    private var vlcVideoLayoutRef: VLCVideoLayout? = null
 
     private val pickLocalSubtitleLauncher =
         registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -142,7 +153,6 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         subtitleTextSizeSp = VideoSubtitlePrefStore.loadTextSizeSp(this)
         subtitlePgsScale = VideoSubtitlePrefStore.loadPgsScale(this)
         simpToTradEnabled = VideoSubtitlePrefStore.loadSimpToTrad(this)
-
         intent.getStringArrayExtra(EXTRA_SUBTITLE_URIS)?.filter { it.isNotBlank() }?.let {
             extraSubtitleUris.addAll(it)
         }
@@ -161,7 +171,6 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         val topChromeScroll = findViewById<HorizontalScrollView>(R.id.top_chrome_scroll)
         topChromeScrollRef = topChromeScroll
         val btnExit = findViewById<Button>(R.id.btn_exit)
-
         setupWindowInsets()
 
         val isRemoteStream = videoUri.scheme?.startsWith("http") == true
@@ -178,6 +187,22 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 }
             },
         )
+
+        if (shouldUseVlcEngine(videoUri, titleHint)) {
+            setupVlcPlayback(videoUri, savedInstanceState)
+            return
+        }
+
+        findViewById<VLCVideoLayout>(R.id.vlc_video_layout).visibility = View.GONE
+        findViewById<PlayerControlView>(R.id.vlc_player_control).apply {
+            visibility = View.GONE
+            player = null
+        }
+        vlcControlRef = null
+        playerView.visibility = View.VISIBLE
+        playerViewRef = playerView
+        controlsRootRef = playerView
+
         playerView.setControllerVisibilityListener(
             PlayerView.ControllerVisibilityListener { visibility ->
                 uiChromeVisible = visibility == View.VISIBLE
@@ -226,10 +251,11 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 .build()
                 .also { player = it }
         exo.setWakeMode(C.WAKE_MODE_NETWORK)
-        exo.setVideoEffects(listOf(videoBrightnessMatrix))
+        refreshVideoEffects()
         val wrapped = PlaylistNavPlayer(exo)
         playlistPlayer = wrapped
         playerView.player = wrapped
+        playerView.setControllerShowTimeoutMs(0)
         setupPlayerViewInteractions(playerView)
         setupEmbeddedCueConverter(exo, playerView)
 
@@ -318,6 +344,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         }
         VideoPlaybackForegroundService.setUserBrowsingApp(false)
         if (intent.getBooleanExtra(EXTRA_RESUME_PLAY, false)) {
+            vlcSession?.resume()
             player?.playWhenReady = true
             if (isRemoteStreamPlayback) {
                 VideoPlaybackForegroundService.start(this, titleHint)
@@ -327,6 +354,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        vlcSession?.resume()
         player?.playWhenReady = true
         applyImmersiveMode(!uiChromeVisible)
         updateTopChromePadding()
@@ -369,7 +397,248 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
+        vlcSession?.let { outState.putLong(KEY_PLAYBACK_POSITION, it.currentPositionMs()) }
         player?.let { outState.putLong(KEY_PLAYBACK_POSITION, it.currentPosition) }
+    }
+
+    private fun setupVlcPlayback(
+        videoUri: Uri,
+        savedInstanceState: Bundle?,
+        startMsOverride: Long? = null,
+    ) {
+        val exoPlayerView = findViewById<PlayerView>(R.id.player_view)
+        exoPlayerView.visibility = View.GONE
+        exoPlayerView.player = null
+        playerViewRef = null
+
+        val vlcLayout = findViewById<VLCVideoLayout>(R.id.vlc_video_layout)
+        vlcVideoLayoutRef = vlcLayout
+        vlcLayout.visibility = View.VISIBLE
+
+        val vlcControl = findViewById<PlayerControlView>(R.id.vlc_player_control)
+        vlcControl.visibility = View.VISIBLE
+        vlcControlRef = vlcControl
+        controlsRootRef = vlcControl
+
+        val startMs = startMsOverride ?: resolveInitialPosition(savedInstanceState)
+        vlcBindingPlayer?.stopPolling()
+        vlcBindingPlayer?.release()
+        vlcBindingPlayer = null
+        vlcControl.player = null
+        vlcSession?.release()
+        vlcSession = null
+        val mediaItem = MediaItem.Builder().setUri(videoUri).build()
+        val session =
+            try {
+                NasVlcPlayerSession(
+                    context = this,
+                    videoLayout = vlcLayout,
+                    onEnded = {
+                        VideoProgressStore.clear(this, progressStorageKey)
+                        finishWithResult(null)
+                    },
+                    onError = { code ->
+                        playbackError = code
+                        Toast.makeText(this, "播放失敗，可嘗試外部 VLC", Toast.LENGTH_LONG).show()
+                        finishWithResult(code)
+                    },
+                )
+            } catch (e: Exception) {
+                playbackError = e.message ?: "VLC_INIT_FAILED"
+                Toast.makeText(this, "VLC 引擎初始化失敗：${e.message}", Toast.LENGTH_LONG).show()
+                finishWithResult(playbackError)
+                return
+            }
+        vlcSession = session.also {
+            it.setUserBrightnessBias(videoBrightnessMatrix.brightness)
+            it.setSubtitleTextScaleSp(subtitleTextSizeSp)
+            it.setSimpToTradEnabled(simpToTradEnabled)
+        }
+        vlcBindingPlayer =
+            VlcBindingPlayer(mainLooper, session, mediaItem).also {
+                it.startPolling()
+            }
+        val wrapped = PlaylistNavPlayer(vlcBindingPlayer!!)
+        playlistPlayer = wrapped
+        vlcControl.player = wrapped
+
+        vlcTapCatcherRef = findViewById(R.id.vlc_tap_catcher)
+        vlcTapCatcherRef?.setOnClickListener { setVlcChromeVisible(true) }
+
+        vlcControl.addVisibilityListener(
+            PlayerControlView.VisibilityListener { visibility ->
+                val visible = visibility == View.VISIBLE
+                if (visible != uiChromeVisible) {
+                    syncVlcTapCatcher(visible)
+                }
+                if (visible) {
+                    vlcControl.post {
+                        alignPlaylistCurrentFromPlayback()
+                        ensureSubtitleButtonInteractive(vlcControl)
+                    }
+                }
+            },
+        )
+        setupVlcControlInteractions(vlcControl, vlcLayout)
+        setVlcChromeVisible(true)
+        applyVlcWindowBrightness()
+
+        ioExecutor.execute {
+            val subs = convertSubtitleUriList(extraSubtitleUris.toList())
+            runOnUiThread {
+                startVlcPlayWhenReady(vlcLayout) {
+                    vlcSession?.play(videoUri, startMs, subs)
+                    val (ox, oy) = VideoSubtitlePrefStore.loadSubtitleOffset(this)
+                    vlcSession?.applySubtitleSurfaceOffset(ox, oy)
+                    if (startMs > 0L) {
+                        Toast.makeText(
+                            this,
+                            "已從 ${formatResumeTime(startMs)} 接續播放",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                    VideoPlaybackForegroundService.start(this, titleHint)
+                    startProgressSaving()
+                    alignPlaylistCurrentFromPlayback()
+                }
+            }
+        }
+    }
+
+    private fun setVlcChromeVisible(visible: Boolean) {
+        val control = vlcControlRef ?: return
+        uiChromeVisible = visible
+        topChromeScrollRef?.visibility = if (visible) View.VISIBLE else View.GONE
+        if (visible) {
+            vlcTapCatcherRef?.visibility = View.GONE
+            control.visibility = View.VISIBLE
+            control.show()
+        } else {
+            control.hide()
+            vlcTapCatcherRef?.visibility = View.VISIBLE
+            vlcTapCatcherRef?.bringToFront()
+        }
+        applyImmersiveMode(!visible)
+        updateTopChromePadding()
+        if (visible) {
+            control.post {
+                alignPlaylistCurrentFromPlayback()
+                ensureSubtitleButtonInteractive(control)
+            }
+        }
+    }
+
+    private fun syncVlcTapCatcher(visible: Boolean) {
+        uiChromeVisible = visible
+        topChromeScrollRef?.visibility = if (visible) View.VISIBLE else View.GONE
+        vlcTapCatcherRef?.visibility = if (visible) View.GONE else View.VISIBLE
+        if (!visible) {
+            vlcTapCatcherRef?.bringToFront()
+        }
+        applyImmersiveMode(!visible)
+        updateTopChromePadding()
+    }
+
+    private fun setupVlcControlInteractions(
+        control: PlayerControlView,
+        touchTarget: View,
+    ) {
+        control.setShowTimeoutMs(0)
+        control.setShowRewindButton(true)
+        control.setShowFastForwardButton(true)
+        control.setShowPreviousButton(true)
+        control.setShowNextButton(true)
+        control.setShowSubtitleButton(true)
+        control.post {
+            control.findViewById<View>(Media3UiR.id.exo_controls_background)?.apply {
+                visibility = View.GONE
+                background = null
+            }
+            vlcVideoLayoutRef?.let { layout ->
+                pinchZoomHelper = VideoPinchZoomHelper(layout)
+                val (offsetX, offsetY) = VideoSubtitlePrefStore.loadSubtitleOffset(this@LocalVideoPlayerActivity)
+                vlcSubtitleDragHelper =
+                    VlcSubtitleDragHelper(
+                        videoLayout = layout,
+                        subtitleSurfaceProvider = { vlcSession?.findSubtitleSurface() },
+                        hasActiveSubtitles = { vlcSession?.hasActiveSubtitles() == true },
+                    ) { x, y ->
+                        VideoSubtitlePrefStore.saveSubtitleOffset(this@LocalVideoPlayerActivity, x, y)
+                    }.also {
+                        layout.post { it.applySavedOffset(offsetX, offsetY) }
+                    }
+            }
+            val routeVlcTouch =
+                View.OnTouchListener { _, event ->
+                    vlcSubtitleDragHelper?.onTouchEvent(event, uiChromeVisible)?.let { if (it) return@OnTouchListener true }
+                    val helper = pinchZoomHelper
+                    if (helper != null && helper.shouldHandle(event)) {
+                        helper.onTouchEvent(event)
+                    } else {
+                        false
+                    }
+                }
+            control.isClickable = true
+            control.setOnClickListener {
+                if (uiChromeVisible) {
+                    setVlcChromeVisible(false)
+                }
+            }
+            control.setOnTouchListener { _, event ->
+                if (vlcSubtitleDragHelper?.onTouchEvent(event, uiChromeVisible) == true) {
+                    return@setOnTouchListener true
+                }
+                false
+            }
+            touchTarget.isClickable = true
+            touchTarget.setOnClickListener {
+                if (uiChromeVisible) {
+                    setVlcChromeVisible(false)
+                } else {
+                    setVlcChromeVisible(true)
+                }
+            }
+            touchTarget.setOnTouchListener(routeVlcTouch)
+            control.findViewById<ImageButton>(Media3UiR.id.exo_settings)?.setOnClickListener {
+                showVideoSettingsMenu()
+            }
+            ensureSubtitleButtonInteractive(control)
+            setupStreamPlaylistButton(control)
+            setupPlaylistSkipButtons(control)
+        }
+    }
+
+    private fun startVlcPlayWhenReady(
+        vlcLayout: VLCVideoLayout,
+        onReady: () -> Unit,
+    ) {
+        fun launchIfSized(): Boolean {
+            if (vlcLayout.width > 0 && vlcLayout.height > 0) {
+                onReady()
+                return true
+            }
+            return false
+        }
+        vlcLayout.post {
+            if (launchIfSized()) return@post
+            val observer = vlcLayout.viewTreeObserver
+            observer.addOnGlobalLayoutListener(
+                object : ViewTreeObserver.OnGlobalLayoutListener {
+                    override fun onGlobalLayout() {
+                        if (!launchIfSized()) return
+                        vlcLayout.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    }
+                },
+            )
+        }
+    }
+
+    private fun shouldUseVlcEngine(uri: Uri, title: String): Boolean {
+        val name = title.ifBlank { uri.lastPathSegment.orEmpty() }.lowercase()
+        return name.endsWith(".rmvb") ||
+            name.endsWith(".rm") ||
+            name.contains(".rmvb") ||
+            name.contains(".rm")
     }
 
     private fun setupWindowForVideo() {
@@ -382,6 +651,33 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 }
         }
         applyImmersiveMode(true)
+    }
+
+    private fun refreshVideoEffects() {
+        vlcSession?.let {
+            it.setUserBrightnessBias(videoBrightnessMatrix.brightness)
+            applyVlcWindowBrightness()
+            return
+        }
+        val effects = mutableListOf<Effect>()
+        if (videoBrightnessMatrix.brightness != 0f) {
+            effects.add(videoBrightnessMatrix)
+        }
+        player?.setVideoEffects(effects)
+    }
+
+    private fun applyVlcWindowBrightness() {
+        if (vlcSession == null) return
+        val bias = videoBrightnessMatrix.brightness
+        val lp = window.attributes
+        lp.screenBrightness = (0.55f + bias * 0.4f).coerceIn(0.15f, 1.0f)
+        window.attributes = lp
+    }
+
+    private fun resetWindowScreenBrightness() {
+        val lp = window.attributes
+        lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        window.attributes = lp
     }
 
     private fun setupWindowInsets() {
@@ -437,9 +733,14 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             contentFrameRef = contentFrame
             installContentFrameLayoutListener(contentFrame)
             val subtitleView = installDisplaySubtitleOverlay(contentFrame)
-            val videoSurface = contentFrame?.let { findVideoSurface(it) }
-            if (videoSurface != null) {
-                pinchZoomHelper = VideoPinchZoomHelper(videoSurface)
+            val zoomTarget =
+                if (vlcSession != null) {
+                    vlcVideoLayoutRef
+                } else {
+                    contentFrame?.let { findVideoSurface(it) }
+                }
+            if (zoomTarget != null) {
+                pinchZoomHelper = VideoPinchZoomHelper(zoomTarget)
             }
             if (subtitleView != null) {
                 val (offsetX, offsetY) = VideoSubtitlePrefStore.loadSubtitleOffset(this)
@@ -448,7 +749,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                         context = this@LocalVideoPlayerActivity,
                         playerView = playerView,
                         subtitleView = subtitleView,
-                        playerProvider = { player },
+                        playerProvider = { playlistPlayer },
                         textSizeSpProvider = { subtitleTextSizeSp },
                         isPgsModeProvider = { embeddedSubtitleIsPgs },
                         pgsScaleProvider = { subtitlePgsScale },
@@ -482,8 +783,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         }
     }
 
-    private fun setupStreamPlaylistButton(playerView: PlayerView) {
-        val btn = playerView.findViewById<ImageButton>(R.id.nas_exo_playlist) ?: return
+    private fun setupStreamPlaylistButton(root: View) {
+        val btn = root.findViewById<ImageButton>(R.id.nas_exo_playlist) ?: return
         if (!VideoStreamPlaylistStore.hasPlaylist()) {
             btn.visibility = View.GONE
             return
@@ -494,9 +795,9 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         ensureStreamPlaylistPanel()
     }
 
-    private fun setupPlaylistSkipButtons(playerView: PlayerView) {
-        val prevBtn = playerView.findViewById<ImageButton>(Media3UiR.id.exo_prev)
-        val nextBtn = playerView.findViewById<ImageButton>(Media3UiR.id.exo_next)
+    private fun setupPlaylistSkipButtons(root: View) {
+        val prevBtn = root.findViewById<ImageButton>(Media3UiR.id.exo_prev)
+        val nextBtn = root.findViewById<ImageButton>(Media3UiR.id.exo_next)
         prevBtn?.setOnClickListener {
             if (VideoStreamPlaylistStore.isPlaylistMode() && VideoStreamPlaylistStore.hasPrevious()) {
                 VideoStreamPlaylistStore.getPrevious()?.let { playStreamPlaylistItem(it) }
@@ -507,7 +808,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 VideoStreamPlaylistStore.getNext()?.let { playStreamPlaylistItem(it) }
             }
         }
-        refreshPlaylistSkipButtons(playerView)
+        refreshPlaylistSkipButtons(root)
     }
 
     private fun alignPlaylistCurrentFromPlayback() {
@@ -516,8 +817,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         refreshPlaylistSkipButtons()
     }
 
-    private fun refreshPlaylistSkipButtons(playerView: PlayerView? = playerViewRef) {
-        val pv = playerView ?: return
+    private fun refreshPlaylistSkipButtons(root: View? = controlsRootRef) {
+        val pv = root ?: return
         val prevBtn = pv.findViewById<ImageButton>(Media3UiR.id.exo_prev) ?: return
         val nextBtn = pv.findViewById<ImageButton>(Media3UiR.id.exo_next) ?: return
         val mode = VideoStreamPlaylistStore.isPlaylistMode()
@@ -532,10 +833,10 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
 
     /** 前端 sync 播放列表或切曲後更新播放器 UI。 */
     fun refreshStreamPlaylistUi() {
-        val pv = playerViewRef ?: return
+        val root = controlsRootRef ?: return
         alignPlaylistCurrentFromPlayback()
-        setupStreamPlaylistButton(pv)
-        refreshPlaylistSkipButtons(pv)
+        setupStreamPlaylistButton(root)
+        refreshPlaylistSkipButtons(root)
         if (streamPlaylistOpen) {
             refreshStreamPlaylistPanel()
         }
@@ -627,7 +928,6 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     private fun playStreamPlaylistItem(item: VideoStreamPlaylistStore.Item) {
         streamPlaylistOpen = false
         streamPlaylistPanel?.visibility = View.GONE
-        val exo = player ?: return
         val streamUrl = buildPcStreamUrl(item.host, item.port, item.relPath)
         pcHost = item.host
         pcPort = item.port
@@ -635,6 +935,27 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         titleHint = item.title
         playbackUri = Uri.parse(streamUrl)
         VideoStreamPlaylistStore.setCurrentRelPath(item.relPath)
+        progressStorageKey =
+            VideoProgressStore.key(pcHost, pcPort, pcRelPath, playbackUri.toString())
+        val vlc = vlcSession
+        if (vlc != null) {
+            if (!shouldUseVlcEngine(playbackUri!!, titleHint)) {
+                Toast.makeText(this, "播放清單已切換至不支援格式，請返回後重新選擇", Toast.LENGTH_LONG).show()
+                return
+            }
+            vlcBindingPlayer?.updateMediaItem(MediaItem.Builder().setUri(playbackUri!!).build())
+            ioExecutor.execute {
+                val subs = convertSubtitleUriList(extraSubtitleUris.toList())
+                runOnUiThread {
+                    val startMs = VideoProgressStore.load(this, progressStorageKey)
+                    vlc.play(playbackUri!!, startMs, subs)
+                    refreshPlaylistSkipButtons()
+                    Toast.makeText(this, "播放：${item.title}", Toast.LENGTH_SHORT).show()
+                }
+            }
+            return
+        }
+        val exo = player ?: return
         applyMediaItem(exo, playbackUri!!, 0L, true)
         refreshPlaylistSkipButtons()
         if (streamPlaylistOpen) {
@@ -809,9 +1130,34 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     }
 
     private fun reloadSubtitlesAfterPrefChange() {
+        vlcSession?.let { vlc ->
+            vlc.setSimpToTradEnabled(simpToTradEnabled)
+            if (extraSubtitleUris.isNotEmpty()) {
+                val video = playbackUri ?: return
+                ioExecutor.execute {
+                    val converted = convertSubtitleUriList(extraSubtitleUris.toList())
+                    runOnUiThread {
+                        extraSubtitleUris.clear()
+                        extraSubtitleUris.addAll(converted)
+                        persistExternalSubtitles()
+                        reloadVlcAtCurrentPosition()
+                    }
+                }
+            } else {
+                vlc.reapplySubtitleOptionsAtCurrentPosition()
+                if (simpToTradEnabled) {
+                    Toast.makeText(
+                        this,
+                        "簡轉繁僅對外掛字幕有效；內嵌字幕請改用「本地字幕」載入",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+            return
+        }
         if (extraSubtitleUris.isEmpty()) return
-        val exo = player ?: return
         val video = playbackUri ?: return
+        val exo = player ?: return
         val pos = exo.currentPosition
         val playing = exo.isPlaying
         ioExecutor.execute {
@@ -824,8 +1170,35 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             }
         }
     }
-    private fun ensureSubtitleButtonInteractive(playerView: PlayerView) {
-        playerView.findViewById<ImageButton>(Media3UiR.id.exo_subtitle)?.apply {
+
+    private fun resolveVlcResumePosition(): Long {
+        val vlc = vlcSession ?: return 0L
+        val live = vlc.currentPositionMs()
+        if (live >= 1000L) return live
+        val saved = VideoProgressStore.load(this, progressStorageKey)
+        if (saved >= 1000L) return saved
+        return live.coerceAtLeast(0L)
+    }
+
+    private fun reloadVlcAtCurrentPosition() {
+        val uri = playbackUri ?: return
+        val vlc = vlcSession ?: return
+        val pos = resolveVlcResumePosition()
+        val playing = vlc.isPlaying()
+        vlc.setUserBrightnessBias(videoBrightnessMatrix.brightness)
+        ioExecutor.execute {
+            val subs = convertSubtitleUriList(extraSubtitleUris.toList())
+            runOnUiThread {
+                vlc.play(uri, pos, subs, hideVideoUntilSeeked = pos > 0L)
+                if (!playing) {
+                    vlc.pause()
+                }
+            }
+        }
+    }
+
+    private fun ensureSubtitleButtonInteractive(root: View) {
+        root.findViewById<ImageButton>(Media3UiR.id.exo_subtitle)?.apply {
             isEnabled = true
             alpha = 1f
             setOnClickListener { showSubtitleSourceMenu() }
@@ -852,6 +1225,10 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     }
 
     private fun showEmbeddedSubtitleDialog() {
+        if (vlcSession != null) {
+            showVlcSpuTrackDialog()
+            return
+        }
         val exo = player ?: return
         val selector = trackSelectorRef ?: return
         val nameProvider = DefaultTrackNameProvider(resources)
@@ -1073,6 +1450,16 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         }
         extraSubtitleUris.add(uri)
         persistExternalSubtitles()
+        if (vlcSession != null) {
+            val vlc = vlcSession!!
+            if (vlc.addExternalSubtitle(uri)) {
+                Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
+            } else {
+                reloadVlcAtCurrentPosition()
+                Toast.makeText(this, toastMessage, Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
         val exo = player ?: return
         val video = playbackUri ?: return
         val pos = exo.currentPosition
@@ -1186,6 +1573,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         persistPlaybackProgress()
         persistExternalSubtitles()
         player?.trackSelectionParameters?.let { persistTextTrackSelection(it) }
+        vlcSession?.pause()
         player?.pause()
         player?.playWhenReady = false
         val uri = playbackUri?.toString().orEmpty()
@@ -1216,13 +1604,12 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     }
 
     private fun showVideoSettingsMenu() {
-        val exo = player ?: return
         AlertDialog.Builder(this)
             .setTitle("播放設定")
             .setItems(arrayOf("播放速度", "音訊音軌", "數位亮度", "字幕尺寸")) { _, which ->
                 when (which) {
-                    0 -> showPlaybackSpeedDialog(exo)
-                    1 -> showAudioTrackDialog(exo)
+                    0 -> showPlaybackSpeedDialog()
+                    1 -> showAudioTrackDialog()
                     2 -> showBrightnessDialog()
                     3 -> showSubtitleSizeDialog()
                 }
@@ -1230,7 +1617,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             .show()
     }
 
-    private fun showPlaybackSpeedDialog(exo: ExoPlayer) {
+    private fun showPlaybackSpeedDialog() {
         val speeds = floatArrayOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 2f)
         val labels =
             speeds.map { speed ->
@@ -1239,12 +1626,108 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("播放速度")
             .setItems(labels) { _, which ->
-                exo.setPlaybackSpeed(speeds[which])
+                val speed = speeds[which]
+                vlcSession?.setPlaybackSpeed(speed)
+                    ?: player?.setPlaybackSpeed(speed)
             }
             .show()
     }
 
-    private fun showAudioTrackDialog(exo: ExoPlayer) {
+    private fun showVlcSpuTrackDialog(retry: Int = 0) {
+        val vlc = vlcSession ?: return
+        val tracks = vlc.spuTracks()
+        if (tracks.isEmpty()) {
+            if (retry < 12) {
+                if (retry == 0) {
+                    Toast.makeText(this, "正在載入字幕軌…", Toast.LENGTH_SHORT).show()
+                }
+                vlcControlRef?.postDelayed({ showVlcSpuTrackDialog(retry + 1) }, 450)
+                return
+            }
+            Toast.makeText(this, "此影片沒有內嵌字幕", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val current = vlc.currentSpuTrack()
+        val labels = mutableListOf<String>()
+        val actions = mutableListOf<() -> Boolean>()
+        labels.add("關閉字幕" + if (current < 0) " ✓" else "")
+        actions.add { vlc.disableSubtitles() }
+        val chineseTrackIds =
+            tracks
+                .filter { SubtitleCharsetHelper.isChineseSubtitleName(it.name) }
+                .map { it.id }
+        for (track in tracks) {
+            val name =
+                SubtitleCharsetHelper.vlcSpuTrackDisplayName(
+                    track.name.ifBlank { "字幕 ${track.id}" },
+                    track.id,
+                    chineseTrackIds,
+                )
+            labels.add(name + if (track.id == current) " ✓" else "")
+            val trackId = track.id
+            actions.add {
+                val ok = vlc.setSpuTrack(trackId)
+                if (ok) {
+                    val (ox, oy) = VideoSubtitlePrefStore.loadSubtitleOffset(this)
+                    vlc.applySubtitleSurfaceOffset(ox, oy)
+                    vlcSubtitleDragHelper?.applySavedOffset(ox, oy)
+                }
+                ok
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("內嵌字幕")
+            .setItems(labels.toTypedArray()) { _, which ->
+                val ok = actions[which]()
+                Toast.makeText(
+                    this,
+                    if (ok) "字幕已切換" else "字幕切換失敗",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            .show()
+    }
+
+    private fun showVlcAudioTrackDialog(retry: Int = 0) {
+        val vlc = vlcSession ?: return
+        val tracks = vlc.audioTracks()
+        if (tracks.isEmpty()) {
+            if (retry < 12) {
+                if (retry == 0) {
+                    Toast.makeText(this, "正在載入音訊軌…", Toast.LENGTH_SHORT).show()
+                }
+                vlcControlRef?.postDelayed({ showVlcAudioTrackDialog(retry + 1) }, 450)
+                return
+            }
+            Toast.makeText(this, "沒有可切換的音訊音軌", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val current = vlc.currentAudioTrack()
+        val labels =
+            tracks
+                .map { track ->
+                    val name = track.name.ifBlank { "音軌 ${track.id}" }
+                    name + if (track.id == current) " ✓" else ""
+                }.toTypedArray()
+        AlertDialog.Builder(this)
+            .setTitle("音訊音軌")
+            .setItems(labels) { _, which ->
+                val ok = vlc.setAudioTrack(tracks[which].id)
+                Toast.makeText(
+                    this,
+                    if (ok) "音軌已切換" else "音軌切換失敗",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            .show()
+    }
+
+    private fun showAudioTrackDialog() {
+        if (vlcSession != null) {
+            showVlcAudioTrackDialog()
+            return
+        }
+        val exo = player ?: return
         TrackSelectionDialogBuilder(this, "音訊音軌", exo, C.TRACK_TYPE_AUDIO)
             .build()
             .show()
@@ -1304,6 +1787,10 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         valueLabel.text = "${subtitleTextSizeSp.toInt()} sp"
         simpToTradCheck.isChecked = simpToTradEnabled
 
+        val vlcMode = vlcSession != null
+        if (vlcMode) {
+            hintLabel?.text = "調整字幕顯示大小（鬆手後套用，不影響播放進度）"
+        }
         seekBar.setOnSeekBarChangeListener(
             object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(
@@ -1312,13 +1799,25 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                     fromUser: Boolean,
                 ) {
                     val sizeSp = MIN_SUBTITLE_TEXT_SIZE_SP + progress
-                    applySubtitleTextSize(sizeSp)
+                    if (!vlcMode) {
+                        applySubtitleTextSize(sizeSp)
+                    } else {
+                        subtitleTextSizeSp = sizeSp.coerceIn(MIN_SUBTITLE_TEXT_SIZE_SP, MAX_SUBTITLE_TEXT_SIZE_SP)
+                        VideoSubtitlePrefStore.saveTextSizeSp(this@LocalVideoPlayerActivity, subtitleTextSizeSp)
+                        vlcSession?.setSubtitleTextScaleSp(subtitleTextSizeSp)
+                    }
                     valueLabel.text = "${sizeSp.toInt()} sp"
                 }
 
                 override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
 
-                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    if (vlcMode) {
+                        vlcSession?.reapplySubtitleOptionsAtCurrentPosition()
+                        val (ox, oy) = VideoSubtitlePrefStore.loadSubtitleOffset(this@LocalVideoPlayerActivity)
+                        vlcSession?.applySubtitleSurfaceOffset(ox, oy)
+                    }
+                }
             },
         )
 
@@ -1335,7 +1834,17 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             .setView(dialogView)
             .setPositiveButton("完成", null)
             .setNeutralButton("重設") { _, _ ->
-                applySubtitleTextSize(DEFAULT_SUBTITLE_TEXT_SIZE_SP)
+                if (vlcMode) {
+                    subtitleTextSizeSp = DEFAULT_SUBTITLE_TEXT_SIZE_SP
+                    VideoSubtitlePrefStore.saveTextSizeSp(this, subtitleTextSizeSp)
+                    vlcSession?.setSubtitleTextScaleSp(subtitleTextSizeSp)
+                    vlcSession?.reapplySubtitleOptionsAtCurrentPosition()
+                    valueLabel.text = "${subtitleTextSizeSp.toInt()} sp"
+                    seekBar.progress =
+                        (subtitleTextSizeSp - MIN_SUBTITLE_TEXT_SIZE_SP).toInt().coerceIn(0, seekBar.max)
+                } else {
+                    applySubtitleTextSize(DEFAULT_SUBTITLE_TEXT_SIZE_SP)
+                }
                 if (simpToTradEnabled) {
                     simpToTradCheck.isChecked = false
                 }
@@ -1359,12 +1868,15 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 ) {
                     val brightness = (progress / 100f) - 1f
                     videoBrightnessMatrix.brightness = brightness
+                    refreshVideoEffects()
                     valueLabel.text = formatBrightnessLabel(brightness)
                 }
 
                 override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
 
-                override fun onStopTrackingTouch(seekBar: SeekBar?) = Unit
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    vlcSession?.reapplyVideoAdjustAtCurrentPosition()
+                }
             },
         )
 
@@ -1374,6 +1886,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             .setPositiveButton("完成", null)
             .setNeutralButton("重設亮度") { _, _ ->
                 videoBrightnessMatrix.brightness = 0f
+                refreshVideoEffects()
+                vlcSession?.reapplyVideoAdjustAtCurrentPosition()
             }
             .show()
     }
@@ -1581,16 +2095,43 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
 
     private fun handlePlaybackError(uri: Uri, error: PlaybackException) {
         val code = error.errorCodeName
+        val name =
+            titleHint.ifBlank { uri.lastPathSegment.orEmpty() }.lowercase()
+        val isRmvb =
+            name.endsWith(".rmvb") ||
+                name.endsWith(".rm") ||
+                name.contains(".rmvb") ||
+                name.contains(".rm")
         val isDecode =
             error.errorCode == PlaybackException.ERROR_CODE_DECODING_FAILED ||
                 error.errorCode == PlaybackException.ERROR_CODE_DECODER_INIT_FAILED
+        val isParseUnsupported =
+            error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED ||
+                error.errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED
 
-        if (isDecode) {
+        if (isDecode || isParseUnsupported) {
+            val title =
+                when {
+                    isRmvb || isParseUnsupported -> "內建播放器不支援此格式"
+                    else -> "內建播放器無法解碼"
+                }
+            val rmvbHint =
+                if (isRmvb || isParseUnsupported) {
+                    "\n\nRMVB / RealMedia 為舊式封裝，ExoPlayer 無法直接解析，與 PC 配套端版本無關。"
+                } else {
+                    ""
+                }
+            val bodyHint =
+                if (isDecode) {
+                    "此檔可能為 x265 / 10bit MKV，裝置硬解不支援。"
+                } else {
+                    "此影片封裝格式內建播放器無法處理。"
+                }
             AlertDialog.Builder(this)
-                .setTitle("內建播放器無法解碼")
+                .setTitle(title)
                 .setMessage(
-                    "此檔可能為 x265 / 10bit MKV，裝置硬解不支援。\n\n" +
-                        "可改用外部播放器（如 VLC）開啟同一串流網址，或在 PC 轉為 H.264 8bit。\n\n" +
+                    "$bodyHint$rmvbHint\n\n" +
+                        "可改用外部播放器（如 VLC）開啟同一串流網址，或在 PC 轉為 MP4 / H.264。\n\n" +
                         "錯誤：$code",
                 )
                 .setPositiveButton("外部播放") { _, _ ->
@@ -1653,7 +2194,10 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             name.endsWith(".webm") -> MimeTypes.VIDEO_WEBM
             name.endsWith(".mp4") || name.endsWith(".m4v") -> MimeTypes.VIDEO_MP4
             name.endsWith(".ts") || name.endsWith(".m2ts") -> MimeTypes.VIDEO_MP2T
+            name.endsWith(".rmvb") || name.endsWith(".rm") -> "application/vnd.rn-realmedia-vbr"
             uri.scheme?.startsWith("http") == true && name.contains(".mkv") -> MimeTypes.VIDEO_MATROSKA
+            uri.scheme?.startsWith("http") == true &&
+                (name.contains(".rmvb") || name.contains(".rm")) -> "application/vnd.rn-realmedia-vbr"
             else -> null
         }
     }
@@ -1683,6 +2227,11 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         VideoPlaybackSessionStore.clear(this)
         VideoPlaybackForegroundService.setUserBrowsingApp(false)
         VideoPlaybackForegroundService.stop(this)
+        vlcBindingPlayer?.stopPolling()
+        vlcBindingPlayer?.release()
+        vlcBindingPlayer = null
+        vlcSession?.release()
+        vlcSession = null
         embeddedCueConverter?.let { player?.removeListener(it) }
         embeddedCueConverter = null
         player?.run {
@@ -1703,8 +2252,18 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     }
 
     private fun persistPlaybackProgress() {
-        val exo = player ?: return
         if (progressStorageKey == "unknown") return
+        val vlc = vlcSession
+        if (vlc != null) {
+            VideoProgressStore.save(
+                this,
+                progressStorageKey,
+                vlc.currentPositionMs(),
+                vlc.durationMs(),
+            )
+            return
+        }
+        val exo = player ?: return
         VideoProgressStore.save(
             this,
             progressStorageKey,
@@ -1734,6 +2293,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         super.onPause()
         persistPlaybackProgress()
         stopProgressSaving()
+        vlcSession?.pause()
         if (isFinishing) {
             player?.pause()
         }
@@ -1750,11 +2310,23 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             activeInstance = null
         }
         persistPlaybackProgress()
+        resetWindowScreenBrightness()
         VideoPlaybackForegroundService.stop(this)
         stopProgressSaving()
         embeddedCueConverter?.let { player?.removeListener(it) }
         embeddedCueConverter = null
         ioExecutor.shutdownNow()
+        vlcBindingPlayer?.stopPolling()
+        vlcBindingPlayer?.release()
+        vlcBindingPlayer = null
+        vlcSession?.release()
+        vlcSession = null
+        vlcVideoLayoutRef = null
+        vlcTapCatcherRef = null
+        vlcSubtitleDragHelper = null
+        vlcControlRef?.player = null
+        vlcControlRef = null
+        controlsRootRef = null
         player?.release()
         player = null
         bandwidthMeter = null
@@ -1766,8 +2338,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     }
 
     private inner class PlaylistNavPlayer(
-        private val exo: ExoPlayer,
-    ) : ForwardingPlayer(exo) {
+        delegate: Player,
+    ) : ForwardingPlayer(delegate) {
         override fun isCommandAvailable(command: Int): Boolean {
             if (!VideoStreamPlaylistStore.isPlaylistMode()) {
                 when (command) {

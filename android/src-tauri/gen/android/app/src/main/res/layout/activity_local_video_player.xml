@@ -1,11 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/video_player_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="#000000"
     android:fitsSystemWindows="false">
 
+    <!-- LibVLC 影像層（最底，不被 SurfaceView 遮擋） -->
+    <org.videolan.libvlc.util.VLCVideoLayout
+        android:id="@+id/vlc_video_layout"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:keepScreenOn="true"
+        android:visibility="gone" />
+
+    <!-- ExoPlayer 影片 + 控制列 -->
     <androidx.media3.ui.PlayerView
         android:id="@+id/player_view"
         android:layout_width="match_parent"
@@ -14,9 +25,21 @@
         app:controller_layout_id="@layout/nas_exo_player_control_view"
         app:show_buffering="when_playing"
         app:show_subtitle_button="true"
+        app:show_timeout="0"
         app:use_controller="true"
         app:resize_mode="fit"
         app:surface_type="surface_view" />
+
+    <!-- VLC 模式：僅控制列（無影片 surface），疊在 VLC 畫面上方 -->
+    <androidx.media3.ui.PlayerControlView
+        android:id="@+id/vlc_player_control"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_gravity="center"
+        android:background="@android:color/transparent"
+        android:visibility="gone"
+        app:controller_layout_id="@layout/nas_exo_player_control_view"
+        app:show_timeout="0" />
 
     <HorizontalScrollView
         android:id="@+id/top_chrome_scroll"
@@ -55,5 +78,15 @@
                 android:textSize="11sp" />
         </LinearLayout>
     </HorizontalScrollView>
+
+    <!-- UI 隱藏時接住點擊，喚回控制列 -->
+    <View
+        android:id="@+id/vlc_tap_catcher"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:background="@android:color/transparent"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone" />
 
 </FrameLayout>

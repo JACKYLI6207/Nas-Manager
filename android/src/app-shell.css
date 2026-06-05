@@ -163,3 +163,19 @@
   width: 100%;
   max-width: none;
 }
+
+.gm-remote-browse-foot-slot:empty {
+  display: none;
+}
+
+.bottom-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  background: #1a1a1a;
+  padding-bottom: env(safe-area-inset-bottom, 0);
+}

@@ -1176,6 +1176,7 @@ fn video_mime_from_path(path: &Path) -> &'static str {
         "ts" | "m2ts" => "video/mp2t",
         "flv" => "video/x-flv",
         "wmv" => "video/x-ms-wmv",
+        "rmvb" | "rm" => "application/vnd.rn-realmedia-vbr",
         _ => "application/octet-stream",
     }
 }
@@ -1923,7 +1924,7 @@ fn execute_file_op(state: HttpState, body: FileOpBody) -> FileOpResponse {
                 clipboard_count: None,
             }
         }
-        "delete" => {
+        "delete" | "delete_permanent" => {
             let paths = match normalize_rel_paths(&body.paths) {
                 Ok(p) => p,
                 Err(e) => return fail_op(e),
@@ -1935,13 +1936,58 @@ fn execute_file_op(state: HttpState, body: FileOpBody) -> FileOpResponse {
                     Err(e) => return fail_op(e),
                 };
                 if let Err(e) = remove_path_recursive(&target) {
-                    return fail_op(e.context(format!("刪除失敗：`{rel}`")));
+                    return fail_op(e.context(format!("永久刪除失敗：`{rel}`")));
                 }
                 deleted += 1;
             }
             FileOpResponse {
                 ok: true,
-                message: format!("已刪除 {deleted} 項"),
+                message: format!("已永久刪除 {deleted} 項"),
+                clipboard_count: None,
+            }
+        }
+        "delete_recycle" => {
+            let paths = match normalize_rel_paths(&body.paths) {
+                Ok(p) => p,
+                Err(e) => return fail_op(e),
+            };
+            let mut deleted = 0usize;
+            for rel in &paths {
+                let target = match state.resolve_under_share(rel) {
+                    Ok(p) => p,
+                    Err(e) => return fail_op(e),
+                };
+                if let Err(e) = trash::delete(&target) {
+                    return fail_op(anyhow!("移至資源回收桶失敗：`{rel}`：{e}"));
+                }
+                deleted += 1;
+            }
+            FileOpResponse {
+                ok: true,
+                message: format!("已將 {deleted} 項移至資源回收桶"),
+                clipboard_count: None,
+            }
+        }
+        "mkdir" => {
+            let dest_rel = body.dest_path.trim().trim_start_matches(['/', '\\']).replace('\\', "/");
+            let parent = match state.resolve_browse_dir(&dest_rel) {
+                Ok(d) => d,
+                Err(e) => return fail_op(e),
+            };
+            let name = match validate_entry_name(&body.new_name) {
+                Ok(n) => n,
+                Err(e) => return fail_op(e),
+            };
+            let dst = parent.join(&name);
+            if path_exists(&dst) {
+                return fail_op(anyhow!("資料夾已存在"));
+            }
+            if let Err(e) = std::fs::create_dir(&dst) {
+                return fail_op(anyhow!("建立資料夾失敗：{e}"));
+            }
+            FileOpResponse {
+                ok: true,
+                message: format!("已建立資料夾 {name}"),
                 clipboard_count: None,
             }
         }

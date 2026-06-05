@@ -125,13 +125,17 @@ onMounted(() => {
         <MobileVideoPlay key="video-play" class="read-mode-pane" />
       </div>
 
-      <div
-        v-show="subNav === 'remote'"
-        class="comic-scroll remote-manage-scroll"
-        :class="{ 'remote-manage-scroll--browse': remoteBrowseDockFoot }"
-      >
-        <MobileRemoteManage />
+      <div v-show="subNav === 'remote'" class="comic-scroll remote-manage-scroll">
+        <MobileRemoteManage :home-dock-active="remoteBrowseDockFoot" />
       </div>
+    </div>
+
+    <div
+      v-show="!readerFullscreenActive && subNav === 'remote'"
+      class="bottom-dock"
+      @click.stop
+    >
+      <div id="gm-remote-browse-foot-slot" class="gm-remote-browse-foot-slot" />
     </div>
   </div>
 </template>

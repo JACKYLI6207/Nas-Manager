@@ -22,6 +22,12 @@
 
 -dontwarn androidx.media3.**
 -keep class androidx.media3.** { *; }
+
+-keep class org.videolan.libvlc.** { *; }
+-dontwarn org.videolan.libvlc.**
+
+-keep class com.gentleman.manager.android.NasVlcPlayerSession { *; }
+-keep class com.gentleman.manager.android.VlcBindingPlayer { *; }
 -keep class com.gentleman.manager.android.ReadArgs { *; }
 -keep class com.gentleman.manager.android.TreeArgs { *; }
 -keep class com.gentleman.manager.android.CopyToTreeArgs { *; }

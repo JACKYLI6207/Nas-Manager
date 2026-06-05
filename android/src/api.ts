@@ -17,15 +17,6 @@ export type LocalReaderSource = {
   kind: 'zip' | 'folder'
 }
 
-) {
-  return invoke<string>('prepare_korean_series_folder', {
-    seriesLabel,
-    episodeStart,
-    episodeEnd,
-    existingFolderName: existingFolderName ?? null,
-  })
-}
-
 export function getReaderImage(comicId: number, imgUrl: string) {
   return invoke<number[]>('get_reader_image', { comicId, imgUrl })
 }
@@ -316,7 +307,15 @@ export function uploadRemotePcFiles(
   return invoke<null>('upload_remote_pc_files', { host, port, files, onConflict })
 }
 
-export type RemotePcFileOpAction = 'cut' | 'copy' | 'paste' | 'delete' | 'rename'
+export type RemotePcFileOpAction =
+  | 'cut'
+  | 'copy'
+  | 'paste'
+  | 'delete'
+  | 'delete_recycle'
+  | 'delete_permanent'
+  | 'rename'
+  | 'mkdir'
 
 export type RemotePcFileOpResult = {
   ok: boolean

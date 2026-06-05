@@ -10,24 +10,23 @@
 ## Android APK
 
 ```powershell
-cd android
-pnpm install
+cd Nas-Manager
+pnpm install --dir android
 .\build-apk.ps1 -Mode Full    # 正式四架構
 .\build-apk.ps1 -Mode Fast    # 真機快速測試
 ```
 
-輸出：`Nas-Manager-Android-v1.0.0.apk`
+輸出（倉庫根目錄）：`Nas-Manager-Android-v1.0.0.apk` / `Nas-Manager-Android-v1.0.0-fast.apk`
 
 ## Windows EXE
 
 ```powershell
-cd windows
-pnpm install
-pnpm build
-pnpm tauri build
+cd Nas-Manager
+pnpm install --dir windows
+.\build-exe.ps1
 ```
 
-輸出：`src-tauri/target/release/Nas-Manager-Windows.exe`（依 `tauri.conf.json` 命名）
+輸出（倉庫根目錄）：`Nas-Manager-Windows-v1.0.0.exe`、`Nas-Manager-Windows-v1.0.0.zip`
 
 ## 注意
 

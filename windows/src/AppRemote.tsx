@@ -48,6 +48,7 @@ export default defineComponent({
 
     async function load() {
       loading.value = true
+      message.value = ''
       try {
         config.value = await commands.getConfig()
         if (config.value.remoteManagementShareSlots == null) {
@@ -55,6 +56,10 @@ export default defineComponent({
         }
         syncShareDirsFromConfig()
         await refreshStatus()
+      } catch (err) {
+        config.value = null
+        message.value =
+          err instanceof Error ? `載入設定失敗：${err.message}` : '載入設定失敗，請重新啟動程式'
       } finally {
         loading.value = false
       }

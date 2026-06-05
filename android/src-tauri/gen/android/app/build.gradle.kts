@@ -69,6 +69,7 @@ dependencies {
     implementation("androidx.media3:media3-extractor:$media3Version")
     implementation("androidx.media3:media3-effect:$media3Version")
     implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
+    implementation("org.videolan.android:libvlc-all:3.6.2")
     implementation("androidx.webkit:webkit:1.14.0")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
