@@ -20,6 +20,7 @@ import {
   prepareLocalReaderZip,
   type LocalReaderPages,
 } from '../api'
+import { registerAndroidBackHandler } from '../androidBackStack'
 import {
   cancelFolderListMode,
   clearSourceReadRecord,
@@ -1141,7 +1142,22 @@ watch(
   { immediate: true },
 )
 
+let unregisterBack: (() => void) | null = null
+
 onMounted(() => {
+  unregisterBack = registerAndroidBackHandler(() => {
+    if (readingActive.value) {
+      closeReading()
+      return true
+    }
+    if (pickingSource.value) {
+      cancelFolderListMode()
+      pickingSource.value = false
+      folderMultiZipMode.value = false
+      return true
+    }
+    return false
+  })
   if (localReadSession.sourceListMode && localReadSession.folderSources.length > 0) {
     folderMultiZipMode.value = true
   }
@@ -1166,6 +1182,8 @@ onDeactivated(() => {
 })
 
 onBeforeUnmount(() => {
+  unregisterBack?.()
+  unregisterBack = null
   endPickerWait()
   forceAbortOpenQueue()
   if (scrollSaveTimer !== undefined) clearTimeout(scrollSaveTimer)

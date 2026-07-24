@@ -17,6 +17,8 @@ import {
   updateRemotePcFavoriteName,
   type RemotePcFavorite,
 } from '../remotePcFavoritesStorage'
+import { rememberRemotePcHosts } from '../remotePcHostRegistry'
+import { registerAndroidBackHandler } from '../androidBackStack'
 import MobileRemoteBrowse from './MobileRemoteBrowse.vue'
 
 const props = defineProps<{
@@ -61,6 +63,10 @@ function isFavoritePc(host: string, port: number) {
 
 function reloadFavorites() {
   favorites.value = loadRemotePcFavorites()
+  // 將「Steam Deck (區網)／(偽區網)」等收藏合併登錄，串流時可跨 IP 解析
+  for (const fav of favorites.value) {
+    rememberRemotePcHosts(fav.name, [fav.host], fav.port)
+  }
 }
 
 function displayNameForPc(pc: RemotePcListItem) {
@@ -117,9 +123,10 @@ async function connectToHost(
   if (!result.connected) {
     return { ok: false as const, message: result.message }
   }
+  const connectedHost = result.connectedHost ?? ip
   const item: RemotePcListItem = {
     name: getRemotePcFavoriteDisplayName(
-      result.connectedHost ?? ip,
+      connectedHost,
       port,
       displayName?.trim() || `PC (${ip})`,
     ),
@@ -127,8 +134,9 @@ async function connectToHost(
     port,
     connected: true,
     message: result.message,
-    connectedHost: result.connectedHost ?? ip,
+    connectedHost,
   }
+  rememberRemotePcHosts(item.name, [connectedHost, ip], port)
   const existing = pcs.value.findIndex((p) => p.port === port && p.hosts.includes(ip))
   if (existing >= 0) {
     pcs.value[existing] = item
@@ -159,21 +167,40 @@ async function copyScanLog() {
 async function connectFavoritePcsFirst(): Promise<number> {
   const favs = favorites.value
   if (favs.length === 0) return 0
+  const maxParallel = 6
   let ok = 0
-  status.value = `正在連線已收藏的 ${favs.length} 台 PC…`
-  for (const fav of favs) {
-    const key = favoriteKey(fav.host, fav.port)
-    favoriteConnectingKey.value = key
-    try {
-      const result = await connectToHost(fav.host, fav.port, fav.name, {
-        appendLog: false,
-        preferListFront: true,
-      })
-      if (result.ok) ok++
-    } catch {
-      /* 單台失敗不阻斷 */
+  let nextIndex = 0
+  const connectingKeys = new Set<string>()
+  status.value = `正在連線已收藏的 ${favs.length} 台 PC（並行 ${Math.min(maxParallel, favs.length)}）…`
+
+  const syncConnectingKey = () => {
+    favoriteConnectingKey.value = connectingKeys.values().next().value ?? ''
+  }
+
+  async function worker() {
+    while (nextIndex < favs.length) {
+      const i = nextIndex++
+      const fav = favs[i]!
+      const key = favoriteKey(fav.host, fav.port)
+      connectingKeys.add(key)
+      syncConnectingKey()
+      try {
+        const result = await connectToHost(fav.host, fav.port, fav.name, {
+          appendLog: false,
+          preferListFront: true,
+        })
+        if (result.ok) ok++
+      } catch {
+        /* 單台失敗不阻斷 */
+      } finally {
+        connectingKeys.delete(key)
+        syncConnectingKey()
+      }
     }
   }
+
+  const workers = Array.from({ length: Math.min(maxParallel, favs.length) }, () => worker())
+  await Promise.all(workers)
   favoriteConnectingKey.value = ''
   return ok
 }
@@ -353,9 +380,21 @@ onBeforeUnmount(() => {
   scanGeneration++
   rootRef.value?.closest('.remote-manage-scroll')?.classList.remove('remote-manage-scroll--browse')
   void leaveRemoteWifiMode()
+  unregisterBack?.()
+  unregisterBack = null
 })
 
+let unregisterBack: (() => void) | null = null
+
 onMounted(async () => {
+  unregisterBack = registerAndroidBackHandler(() => {
+    if (browsePc.value) {
+      browsePc.value = null
+      return true
+    }
+    // 遠端管理 PC 列表：吞掉返回／邊緣手勢，交由 App 切回漫畫閱讀，勿關 App
+    return false
+  })
   reloadFavorites()
   try {
     const wifiMsg = await enterRemoteWifiMode()

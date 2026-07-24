@@ -51,6 +51,7 @@ import {
   videoStreamSession,
   type RemoteStreamJob,
 } from '../videoStreamStore'
+import { resolveStreamJobHost } from '../resolveStreamJobHost'
 import '../readerShared.css'
 
 const busy = ref(false)
@@ -444,45 +445,54 @@ async function openLocalVideo() {
 
 async function playStreamJob(job: RemoteStreamJob) {
   if (!acquireStreamPlaybackLock()) return
-  setCurrentStreamJob(job)
-  markVideoStreamOpened(job)
+  streamLog(`開始播放：${job.relPath}`)
+  streamLog(`  原記錄 PC ${job.host}:${job.port}${job.pcName ? `（${job.pcName}）` : ''}`)
+  const resolved = await resolveStreamJobHost(job)
+  if (resolved.host !== job.host) {
+    streamLog(`  已改連目前可達 IP：${resolved.host}:${resolved.port}`)
+    const key = jobKey(job)
+    videoStreamSession.jobs = videoStreamSession.jobs.map((j) =>
+      jobKey(j) === key ? { ...j, host: resolved.host, pcName: j.pcName ?? job.pcName } : j,
+    )
+  }
+  setCurrentStreamJob(resolved)
+  markVideoStreamOpened(resolved)
   bumpVideoProgressUi()
   await syncNativeStreamPlaylist()
-  status.value = `正在串流：${job.title}`
-  streamLog(`開始播放：${job.relPath}`)
-  streamLog(`  PC ${job.host}:${job.port}`)
-  beginStreamPrepOverlay(job.title)
+  status.value = `正在串流：${resolved.title}`
+  streamLog(`  PC ${resolved.host}:${resolved.port}`)
+  beginStreamPrepOverlay(resolved.title)
   let pausedInBackground = false
   let playbackErr: string | null | undefined
   try {
     const result = await playRemotePcVideo(
-      job.host,
-      job.port,
-      job.relPath,
-      job.title,
+      resolved.host,
+      resolved.port,
+      resolved.relPath,
+      resolved.title,
     )
     pausedInBackground = result.background === true
     playbackErr = await handlePlayVideoResult(result)
     if (playbackErr) {
-      streamLog(`播放錯誤：${job.title}`)
+      streamLog(`播放錯誤：${resolved.title}`)
       streamLog(`  ${playbackErr}`)
       if (playbackErr.includes('DECODING')) {
         streamLog('  提示：x265/10bit MKV 可試「外部播放」(VLC) 或請 PC 轉 H.264')
       }
       status.value = `播放錯誤：${playbackErr}`
     } else if (result.background) {
-      streamLog(`背景播放中：${job.title}`)
+      streamLog(`背景播放中：${resolved.title}`)
     } else {
-      streamLog(`已結束播放：${job.title}`)
+      streamLog(`已結束播放：${resolved.title}`)
       const remain = videoStreamSession.jobs.length
       status.value =
         remain > 0
-          ? `已播放 ${job.title}，播放列表尚餘 ${remain} 部`
-          : `已播放 ${job.title}`
+          ? `已播放 ${resolved.title}，播放列表尚餘 ${remain} 部`
+          : `已播放 ${resolved.title}`
     }
   } catch (e) {
     const err = formatInvokeError(e)
-    streamLog(`失敗：${job.title}`)
+    streamLog(`失敗：${resolved.title}`)
     streamLog(`  ${err}`)
     status.value = err
     playbackErr = err
@@ -609,12 +619,17 @@ async function resumeCurrentStream() {
   streamLog(`接續觀看：${job.relPath}`)
   beginStreamPrepOverlay(job.title)
   try {
+    const resolved = await resolveStreamJobHost(job)
+    if (resolved.host !== job.host) {
+      streamLog(`  已改連目前可達 IP：${resolved.host}:${resolved.port}`)
+      setCurrentStreamJob(resolved)
+    }
     await syncNativeStreamPlaylist()
     const result = await playRemotePcVideo(
-      job.host,
-      job.port,
-      job.relPath,
-      job.title,
+      resolved.host,
+      resolved.port,
+      resolved.relPath,
+      resolved.title,
       null,
       { resumeOnly: true },
     )

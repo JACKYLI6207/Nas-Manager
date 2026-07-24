@@ -20,6 +20,7 @@ import {
   renameFavoriteStreamPlaylist,
   type FavoriteStreamPlaylist,
 } from '../streamPlaylistStorage'
+import { defaultStreamFavoriteName } from '../streamFavoriteName'
 import StreamPlaylistList from './StreamPlaylistList.vue'
 import {
   formatVideoStreamProgressLabel,
@@ -45,6 +46,7 @@ import {
   videoStreamSession,
   type RemoteStreamJob,
 } from '../videoStreamStore'
+import { resolveStreamJobHost } from '../resolveStreamJobHost'
 import '../readerShared.css'
 
 const busy = ref(false)
@@ -327,43 +329,54 @@ async function openLocalVideo() {
 
 async function playStreamJob(job: RemoteStreamJob) {
   if (!acquireStreamPlaybackLock()) return
-  setCurrentStreamJob(job)
-  markVideoStreamOpened(job)
-  await syncNativeStreamPlaylist()
-  status.value = `正在串流：${job.title}`
+  status.value = `正在連線：${job.title}`
   streamLog(`開始播放：${job.relPath}`)
-  streamLog(`  PC ${job.host}:${job.port}`)
+  streamLog(`  原記錄 PC ${job.host}:${job.port}${job.pcName ? `（${job.pcName}）` : ''}`)
+  const resolved = await resolveStreamJobHost(job)
+  if (resolved.host !== job.host) {
+    streamLog(`  已改連目前可達 IP：${resolved.host}:${resolved.port}`)
+    // 同步更新佇列內同鍵項目的 host，避免下一集又走失效 IP
+    const key = jobKey(job)
+    videoStreamSession.jobs = videoStreamSession.jobs.map((j) =>
+      jobKey(j) === key ? { ...j, host: resolved.host, pcName: j.pcName ?? job.pcName } : j,
+    )
+  }
+  setCurrentStreamJob(resolved)
+  markVideoStreamOpened(resolved)
+  await syncNativeStreamPlaylist()
+  status.value = `正在串流：${resolved.title}`
+  streamLog(`  PC ${resolved.host}:${resolved.port}`)
   let pausedInBackground = false
   let playbackErr: string | null | undefined
   try {
     const result = await playRemotePcVideo(
-      job.host,
-      job.port,
-      job.relPath,
-      job.title,
+      resolved.host,
+      resolved.port,
+      resolved.relPath,
+      resolved.title,
     )
     pausedInBackground = result.background === true
     playbackErr = await handlePlayVideoResult(result)
     if (playbackErr) {
-      streamLog(`播放錯誤：${job.title}`)
+      streamLog(`播放錯誤：${resolved.title}`)
       streamLog(`  ${playbackErr}`)
       if (playbackErr.includes('DECODING')) {
         streamLog('  提示：x265/10bit MKV 可試「外部播放」(VLC) 或請 PC 轉 H.264')
       }
       status.value = `播放錯誤：${playbackErr}`
     } else if (result.background) {
-      streamLog(`背景播放中：${job.title}`)
+      streamLog(`背景播放中：${resolved.title}`)
     } else {
-      streamLog(`已結束播放：${job.title}`)
+      streamLog(`已結束播放：${resolved.title}`)
       const remain = videoStreamSession.jobs.length
       status.value =
         remain > 0
-          ? `已播放 ${job.title}，播放列表尚餘 ${remain} 部`
-          : `已播放 ${job.title}`
+          ? `已播放 ${resolved.title}，播放列表尚餘 ${remain} 部`
+          : `已播放 ${resolved.title}`
     }
   } catch (e) {
     const err = formatInvokeError(e)
-    streamLog(`失敗：${job.title}`)
+    streamLog(`失敗：${resolved.title}`)
     streamLog(`  ${err}`)
     status.value = err
     playbackErr = err
@@ -419,6 +432,51 @@ async function onPickQueueJob(job: RemoteStreamJob) {
   await processRemoteStreamQueue()
 }
 
+function onClearCurrentPlaylist() {
+  if (!window.confirm('確定清空串流列表？')) return
+  void stopPlaybackCompletely()
+  clearCurrentStreamQueue()
+  status.value = '已清空串流列表'
+}
+
+function onStarCurrentPlaylist() {
+  const jobs = getFullStreamQueue()
+  if (jobs.length === 0) {
+    status.value = '播放列表為空'
+    return
+  }
+  const suggested = defaultStreamFavoriteName(jobs, `播放列表 ${jobs.length} 部`)
+  const name = window.prompt('收藏列表名稱（可留空＝資料夾名）', suggested)
+  if (name === null) return
+  const finalName = name.trim() || suggested
+  favoritePlaylists.value = addFavoriteStreamPlaylist(finalName, jobs)
+  streamLog(`已加入串流收藏：${finalName}`)
+}
+
+function onLoadFavorite(pl: FavoriteStreamPlaylist) {
+  if (pl.jobs.length === 0) return
+  videoStreamSession.jobs = pl.jobs.map((j) => ({ ...j }))
+  videoStreamSession.currentJob = null
+  videoStreamSession.active = true
+  streamLog(`載入串流收藏：${pl.name}（${pl.jobs.length} 部）`)
+  videoSubTab.value = 'current'
+}
+
+function onRenameFavorite(id: string, currentName: string) {
+  const name = window.prompt('重新命名', currentName)
+  if (name === null) return
+  favoritePlaylists.value = renameFavoriteStreamPlaylist(id, name)
+}
+
+function onRemoveFavorite(id: string) {
+  if (!window.confirm('確定刪除此收藏？')) return
+  favoritePlaylists.value = removeFavoriteStreamPlaylist(id)
+}
+
+function onRemoveFavoriteItem(plId: string, job: RemoteStreamJob) {
+  favoritePlaylists.value = removeFavoriteStreamPlaylistItem(plId, job)
+}
+
 async function onPickFavoriteQueueJob(pl: FavoriteStreamPlaylist, job: RemoteStreamJob) {
   if (videoStreamSession.playbackLocked) {
     try {
@@ -434,52 +492,6 @@ async function onPickFavoriteQueueJob(pl: FavoriteStreamPlaylist, job: RemoteStr
   await processRemoteStreamQueue()
 }
 
-function onClearCurrentPlaylist() {
-  if (!window.confirm('確定清空串流列表？')) return
-  void stopPlaybackCompletely()
-  clearCurrentStreamQueue()
-  status.value = '已清空串流列表'
-}
-
-function onStarCurrentPlaylist() {
-  const jobs = getFullStreamQueue()
-  if (jobs.length === 0) {
-    status.value = '播放列表為空'
-    return
-  }
-  const suggested = `播放列表 ${jobs.length} 部`
-  const name = window.prompt('為此播放列表命名', suggested)
-  if (name === null) return
-  favoritePlaylists.value = addFavoriteStreamPlaylist(name, jobs)
-  streamLog(`已加入收藏播放列表：${name.trim() || suggested}`)
-}
-
-function onRenameFavoritePlaylist(pl: FavoriteStreamPlaylist) {
-  const name = window.prompt('重新命名播放列表', pl.name)
-  if (name === null) return
-  favoritePlaylists.value = renameFavoriteStreamPlaylist(pl.id, name)
-}
-
-function onDeleteFavoritePlaylist(pl: FavoriteStreamPlaylist) {
-  if (!window.confirm(`刪除收藏「${pl.name}」？`)) return
-  favoritePlaylists.value = removeFavoriteStreamPlaylist(pl.id)
-}
-
-async function onPlayFavoritePlaylist(pl: FavoriteStreamPlaylist) {
-  if (pl.jobs.length === 0) return
-  if (videoStreamSession.playbackLocked) {
-    await stopVideoPlayback()
-    releaseStreamPlaybackLock()
-  }
-  videoStreamSession.jobs = pl.jobs.map((j) => ({ ...j }))
-  videoStreamSession.currentJob = null
-  videoStreamSession.active = true
-  streamLog(`載入串流收藏：${pl.name}（${pl.jobs.length} 部）`)
-  requestNavigateToVideoTab()
-  await nextTick()
-  await processRemoteStreamQueue()
-}
-
 async function resumeCurrentStream() {
   const job = currentStreamJob.value
   if (!job || videoStreamSession.playbackLocked) return
@@ -487,12 +499,17 @@ async function resumeCurrentStream() {
   status.value = `正在接續：${job.title}`
   streamLog(`接續觀看：${job.relPath}`)
   try {
+    const resolved = await resolveStreamJobHost(job)
+    if (resolved.host !== job.host) {
+      streamLog(`  已改連目前可達 IP：${resolved.host}:${resolved.port}`)
+      setCurrentStreamJob(resolved)
+    }
     await syncNativeStreamPlaylist()
     const result = await playRemotePcVideo(
-      job.host,
-      job.port,
-      job.relPath,
-      job.title,
+      resolved.host,
+      resolved.port,
+      resolved.relPath,
+      resolved.title,
       null,
       { resumeOnly: true },
     )
@@ -771,7 +788,7 @@ onBeforeUnmount(() => {
         <div class="video-pane-toolbar-actions">
           <button
             type="button"
-            class="reader-btn"
+            class="reader-btn reader-btn--fit"
             :disabled="fullQueueCount === 0"
             @click="onStarCurrentPlaylist"
           >
@@ -779,7 +796,7 @@ onBeforeUnmount(() => {
           </button>
           <button
             type="button"
-            class="reader-btn"
+            class="reader-btn reader-btn--fit"
             :disabled="fullQueueCount === 0"
             @click="onClearCurrentPlaylist"
           >
@@ -795,73 +812,42 @@ onBeforeUnmount(() => {
           :progress-for-job="videoProgressLabel"
           :progress-ratio-for-job="videoProgressRatioForJob"
           :opened-for-job="videoOpenedMark"
+          show-remove
           empty-text="尚無項目；請於遠端管理勾選影片後「串流播放」"
           @play="onPickQueueJob"
+          @remove="removeFromCurrentQueue"
         />
       </div>
     </div>
 
-    <!-- 串流收藏 -->
+    <!-- 串流收藏（UI／操作與漫畫閱讀一致） -->
     <div v-show="videoSubTab === 'favorites'" class="video-sub-pane video-sub-pane--favorites">
       <p class="video-pane-heading video-pane-heading--solo">串流收藏（{{ favoritePlaylists.length }}）</p>
       <div class="fav-pl-scroll">
         <p v-if="favoritePlaylists.length === 0" class="stream-pl-empty">
           尚無收藏；在「串流列表」按「★ 收藏此列表」
         </p>
-        <div
-          v-for="pl in favoritePlaylists"
-          :key="pl.id"
-          class="fav-pl-block"
-          :class="{ 'fav-pl-block--open': isFavoriteExpanded(pl.id) }"
-        >
-          <div class="fav-pl-header" @click="toggleFavoriteExpanded(pl.id)">
-            <span class="fav-pl-caret" aria-hidden="true">{{
-              isFavoriteExpanded(pl.id) ? '▼' : '▶'
-            }}</span>
-            <input
-              class="fav-pl-name"
-              type="text"
-              :value="pl.name"
-              maxlength="48"
-              @click.stop
-              @change="
-                favoritePlaylists = renameFavoriteStreamPlaylist(
-                  pl.id,
-                  ($event.target as HTMLInputElement).value,
-                )
-              "
-              @blur="
-                favoritePlaylists = renameFavoriteStreamPlaylist(
-                  pl.id,
-                  ($event.target as HTMLInputElement).value,
-                )
-              "
-            />
-            <div class="fav-pl-header-actions" @click.stop>
-              <button
-                type="button"
-                class="reader-btn reader-btn--primary"
-                @click="onPlayFavoritePlaylist(pl)"
-              >
-                播放
-              </button>
-              <button type="button" class="reader-btn" @click="onDeleteFavoritePlaylist(pl)">
-                刪除
-              </button>
-            </div>
+        <div v-for="pl in favoritePlaylists" :key="pl.id" class="fav-pl-block">
+          <div class="fav-pl-head">
+            <button type="button" class="fav-pl-toggle" @click="toggleFavoriteExpanded(pl.id)">
+              {{ isFavoriteExpanded(pl.id) ? '▼' : '▶' }}
+            </button>
+            <button type="button" class="fav-pl-name" @click="onLoadFavorite(pl)">{{ pl.name }}</button>
+            <span class="fav-pl-count">{{ pl.jobs.length }} 部</span>
+            <button type="button" class="fav-pl-mini" @click="onRenameFavorite(pl.id, pl.name)">改名</button>
+            <button type="button" class="fav-pl-mini fav-pl-mini--danger" @click="onRemoveFavorite(pl.id)">刪</button>
           </div>
-          <div v-show="isFavoriteExpanded(pl.id)" class="fav-pl-body">
-            <StreamPlaylistList
-              fill
-              :jobs="pl.jobs"
-              :progress-for-job="videoProgressLabel"
-              :progress-ratio-for-job="videoProgressRatioForJob"
-              :opened-for-job="videoOpenedMark"
-              show-remove
-              @play="(job) => onPickFavoriteQueueJob(pl, job)"
-              @remove="(job) => (favoritePlaylists = removeFavoriteStreamPlaylistItem(pl.id, job))"
-            />
-          </div>
+          <StreamPlaylistList
+            v-if="isFavoriteExpanded(pl.id)"
+            fill
+            :jobs="pl.jobs"
+            :progress-for-job="videoProgressLabel"
+            :progress-ratio-for-job="videoProgressRatioForJob"
+            :opened-for-job="videoOpenedMark"
+            show-remove
+            @play="(job) => onPickFavoriteQueueJob(pl, job)"
+            @remove="(job) => onRemoveFavoriteItem(pl.id, job)"
+          />
         </div>
       </div>
     </div>
@@ -1063,18 +1049,11 @@ onBeforeUnmount(() => {
 .fav-pl-scroll {
   flex: 1;
   min-height: 0;
-  display: flex;
-  flex-direction: column;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-}
-
-.fav-pl-block--open {
-  flex: 1;
-  min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  gap: 10px;
+  -webkit-overflow-scrolling: touch;
 }
 
 .video-pane-lead {
@@ -1212,53 +1191,58 @@ onBeforeUnmount(() => {
 }
 
 .fav-pl-block {
-  margin-bottom: 10px;
   border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 8px;
-  overflow: hidden;
-  background: rgba(0, 0, 0, 0.2);
+  border-radius: 10px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
 }
-.fav-pl-header {
+.fav-pl-head {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: clamp(8px, 2.5vw, 10px);
-  background: rgba(0, 0, 0, 0.25);
-  cursor: pointer;
+  flex-wrap: wrap;
 }
-.fav-pl-caret {
-  flex-shrink: 0;
-  width: 1em;
-  font-size: 11px;
-  opacity: 0.85;
+.fav-pl-toggle {
+  border: none;
+  background: transparent;
+  color: inherit;
+  padding: 0 4px;
 }
 .fav-pl-name {
   flex: 1;
   min-width: 0;
-  padding: 4px 8px;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: #6eb5ff;
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fav-pl-count {
+  font-size: 11px;
+  opacity: 0.65;
+}
+.fav-pl-mini {
+  font-size: 11px;
+  padding: 2px 6px;
   border-radius: 6px;
-  border: 1px solid #444;
+  border: 1px solid rgba(255, 255, 255, 0.15);
   background: rgba(0, 0, 0, 0.2);
   color: inherit;
-  font-weight: 600;
-  font-size: clamp(12px, 3vw, 14px);
 }
-.fav-pl-header-actions {
-  display: flex;
-  flex-shrink: 0;
-  gap: 6px;
+.fav-pl-mini--danger {
+  color: #ffb4b4;
 }
-.fav-pl-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  padding: 6px 8px 8px;
-}
-
-.fav-pl-block:not(.fav-pl-block--open) {
-  flex-shrink: 0;
+.stream-pl-empty {
+  margin: 8px 0;
+  font-size: 12px;
+  opacity: 0.7;
 }
 </style>
 

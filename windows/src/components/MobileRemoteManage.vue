@@ -17,6 +17,7 @@ import {
   updateRemotePcFavoriteName,
   type RemotePcFavorite,
 } from '../remotePcFavoritesStorage'
+import { rememberRemotePcHosts } from '../remotePcHostRegistry'
 import MobileRemoteBrowse from './MobileRemoteBrowse.vue'
 
 const props = defineProps<{
@@ -61,6 +62,9 @@ function isFavoritePc(host: string, port: number) {
 
 function reloadFavorites() {
   favorites.value = loadRemotePcFavorites()
+  for (const fav of favorites.value) {
+    rememberRemotePcHosts(fav.name, [fav.host], fav.port)
+  }
 }
 
 function displayNameForPc(pc: RemotePcListItem) {
@@ -136,6 +140,7 @@ async function connectToHost(
     message: result.message,
     connectedHost: result.connectedHost ?? ip,
   }
+  rememberRemotePcHosts(item.name, [item.connectedHost!, ip], port)
   const existing = pcs.value.findIndex((p) => p.port === port && p.hosts.includes(ip))
   if (existing >= 0) {
     pcs.value[existing] = item

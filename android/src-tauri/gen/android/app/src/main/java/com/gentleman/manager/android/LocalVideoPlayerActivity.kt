@@ -1866,7 +1866,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             .setTitle("字幕尺寸")
             .setView(dialogView)
             .setPositiveButton("完成", null)
-            .setNeutralButton("重設") { _, _ ->
+            .setNeutralButton("重設大小") { _, _ ->
+                // 僅重設字級；簡轉繁為全域偏好，不應被「重設」一併關掉
                 if (vlcMode) {
                     subtitleTextSizeSp = DEFAULT_SUBTITLE_TEXT_SIZE_SP
                     VideoSubtitlePrefStore.saveTextSizeSp(this, subtitleTextSizeSp)
@@ -1877,9 +1878,6 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                         (subtitleTextSizeSp - MIN_SUBTITLE_TEXT_SIZE_SP).toInt().coerceIn(0, seekBar.max)
                 } else {
                     applySubtitleTextSize(DEFAULT_SUBTITLE_TEXT_SIZE_SP)
-                }
-                if (simpToTradEnabled) {
-                    simpToTradCheck.isChecked = false
                 }
             }
             .show()

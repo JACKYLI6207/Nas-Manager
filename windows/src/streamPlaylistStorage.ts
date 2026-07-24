@@ -1,3 +1,4 @@
+import { normalizePcName } from './remotePcName'
 import type { RemoteStreamJob } from './videoStreamStore'
 
 const STORAGE_KEY = 'gmFavoriteStreamPlaylists'
@@ -9,8 +10,12 @@ export type FavoriteStreamPlaylist = {
   starredAt: number
 }
 
+/** 進度／收藏去重鍵：優先用 pcName（跨 IP），否則退回 host。 */
 export function jobKey(job: RemoteStreamJob): string {
-  return `${job.host.trim().toLowerCase()}:${job.port}:${job.relPath}`
+  const id = job.pcName?.trim()
+    ? normalizePcName(job.pcName)
+    : job.host.trim().toLowerCase()
+  return `${id}:${job.port}:${job.relPath}`
 }
 
 export function loadFavoriteStreamPlaylists(): FavoriteStreamPlaylist[] {

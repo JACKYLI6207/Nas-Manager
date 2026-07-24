@@ -1,6 +1,6 @@
 [package]
 name = "Nas-Manager-Windows"
-version = "1.1.0"
+version = "1.1.1"
 description = "A Tauri App"
 authors = ["Nas Manager Contributors"]
 edition = "2021"

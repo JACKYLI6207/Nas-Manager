@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { onBackButtonPress } from '@tauri-apps/api/app'
 import MobileComicReadShell from './components/MobileComicReadShell.vue'
 import MobileVideoPlay from './components/MobileVideoPlay.vue'
 import MobileRemoteManage from './components/MobileRemoteManage.vue'
@@ -9,6 +10,7 @@ import { comicReadSubTab } from './comicReadUi'
 import { comicStreamSession } from './comicStreamStore'
 import { pickLocalReaderTitle } from './readerDisplayName'
 import { videoStreamSession } from './videoStreamStore'
+import { tryHandleAndroidBack } from './androidBackStack'
 
 type SubNav = 'read' | 'video' | 'remote'
 
@@ -71,8 +73,29 @@ watch(
   },
 )
 
+let unlistenBack: (() => void) | null = null
+
 onMounted(() => {
   initLocalReadOnAppLaunch()
+  // 必須用 onBackButtonPress（plugin listener），邊緣滑動才會交給前端而非直接 finish Activity
+  void onBackButtonPress(() => {
+    if (tryHandleAndroidBack()) return
+    // 遠端管理根層：回到漫畫閱讀，禁止邊緣手勢關 App
+    if (subNav.value === 'remote') {
+      subNav.value = 'read'
+      return
+    }
+    // 其餘主分頁：吞掉邊緣／返回手勢，不結束 App（避免左右滑直接關掉）
+  }).then((listener) => {
+    unlistenBack = () => {
+      void listener.unregister()
+    }
+  })
+})
+
+onBeforeUnmount(() => {
+  unlistenBack?.()
+  unlistenBack = null
 })
 </script>
 

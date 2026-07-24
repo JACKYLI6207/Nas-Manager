@@ -25,6 +25,8 @@ import { listen } from '@tauri-apps/api/event'
 import { formatInvokeError } from '../invokeError'
 import { copyTextFromTextarea } from '../copyText'
 import { getRemotePcFavoriteDisplayName } from '../remotePcFavoritesStorage'
+import { rememberRemotePcHosts } from '../remotePcHostRegistry'
+import { registerAndroidBackHandler } from '../androidBackStack'
 import {
   activateComicStreamQueueJob,
   comicStreamSession,
@@ -231,6 +233,15 @@ const displayPcName = computed(() =>
   host.value
     ? getRemotePcFavoriteDisplayName(host.value, props.pc.port, props.pc.name)
     : props.pc.name,
+)
+
+watch(
+  () => [displayPcName.value, host.value, props.pc.hosts, props.pc.port] as const,
+  ([name, h, hosts, port]) => {
+    if (!name || !h) return
+    rememberRemotePcHosts(name, [h, ...hosts], port)
+  },
+  { immediate: true },
 )
 
 const pathLabel = computed(() => {
@@ -478,7 +489,13 @@ function closeActionMenus() {
   closeLayoutMenu()
 }
 
-type StreamJob = { host: string; port: number; relPath: string; title: string }
+type StreamJob = {
+  host: string
+  port: number
+  relPath: string
+  title: string
+  pcName?: string
+}
 
 async function collectStreamJobsFromSelection(
   matchFile: (name: string) => boolean,
@@ -487,6 +504,7 @@ async function collectStreamJobsFromSelection(
   if (!h) return []
   const paths = Array.from(selectedItems.value.keys())
   if (paths.length === 0) return []
+  const pcName = displayPcName.value || props.pc.name
 
   const lists = await Promise.all(
     paths.map((path) => listRemotePcFiles(h, props.pc.port, path)),
@@ -505,6 +523,7 @@ async function collectStreamJobsFromSelection(
         port: props.pc.port,
         relPath,
         title: name,
+        pcName,
       })
     }
   }
@@ -580,6 +599,18 @@ function goUp() {
   if (remoteBusy.value) return
   void loadDirectory(parentPath(currentPath.value))
 }
+
+function handleAndroidBack(): boolean {
+  // 資料夾內：上一層；已在根目錄：退出瀏覽回 PC 列表
+  if (currentPath.value) {
+    goUp()
+    return true
+  }
+  emit('exit')
+  return true
+}
+
+let unregisterBack: (() => void) | null = null
 
 function askUploadConflict(conflicts: string[]): Promise<RemoteUploadConflictPolicy | null> {
   uploadConflictList.value = conflicts
@@ -994,6 +1025,7 @@ async function confirmRenameDialog() {
 }
 
 onMounted(async () => {
+  unregisterBack = registerAndroidBackHandler(handleAndroidBack)
   document.addEventListener('click', onDocumentClickForLayoutMenu)
   void loadDirectory('')
   unlistenTransfer = await listen<RemoteTransferProgressEvent>(
@@ -1015,6 +1047,8 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  unregisterBack?.()
+  unregisterBack = null
   document.removeEventListener('click', onDocumentClickForLayoutMenu)
   unlistenTransfer?.()
   stopOverlayElapsedTimer()

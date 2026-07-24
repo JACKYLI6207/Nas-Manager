@@ -25,6 +25,7 @@ import { listen } from '@tauri-apps/api/event'
 import { formatInvokeError } from '../invokeError'
 import { copyTextFromTextarea } from '../copyText'
 import { getRemotePcFavoriteDisplayName } from '../remotePcFavoritesStorage'
+import { rememberRemotePcHosts } from '../remotePcHostRegistry'
 import {
   activateComicStreamQueueJob,
   comicStreamSession,
@@ -231,6 +232,15 @@ const displayPcName = computed(() =>
   host.value
     ? getRemotePcFavoriteDisplayName(host.value, props.pc.port, props.pc.name)
     : props.pc.name,
+)
+
+watch(
+  () => [displayPcName.value, host.value, props.pc.hosts, props.pc.port] as const,
+  ([name, h, hosts, port]) => {
+    if (!name || !h) return
+    rememberRemotePcHosts(name, [h, ...hosts], port)
+  },
+  { immediate: true },
 )
 
 const pathLabel = computed(() => {
@@ -478,7 +488,13 @@ function closeActionMenus() {
   closeLayoutMenu()
 }
 
-type StreamJob = { host: string; port: number; relPath: string; title: string }
+type StreamJob = {
+  host: string
+  port: number
+  relPath: string
+  title: string
+  pcName?: string
+}
 
 async function collectStreamJobsFromSelection(
   matchFile: (name: string) => boolean,
@@ -487,6 +503,7 @@ async function collectStreamJobsFromSelection(
   if (!h) return []
   const paths = Array.from(selectedItems.value.keys())
   if (paths.length === 0) return []
+  const pcName = displayPcName.value || props.pc.name
 
   const lists = await Promise.all(
     paths.map((path) => listRemotePcFiles(h, props.pc.port, path)),
@@ -505,6 +522,7 @@ async function collectStreamJobsFromSelection(
         port: props.pc.port,
         relPath,
         title: name,
+        pcName,
       })
     }
   }

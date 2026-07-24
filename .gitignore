@@ -31,6 +31,11 @@ windows/src-tauri/target/
 *.jks
 *.p12
 
+# Local edit backups (do not publish)
+android/skill/
+windows/skill/
+**/skill/backups/
+
 # Personal assets (do not commit)
 logo.ico
 app-icon.png

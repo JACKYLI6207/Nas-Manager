@@ -1,5 +1,6 @@
 import type { RemoteComicStreamJob } from './comicStreamStore'
 import { comicJobKey } from './comicStreamStore'
+import { defaultStreamFavoriteName } from './streamFavoriteName'
 import { ref } from 'vue'
 
 const STORAGE_KEY = 'gmFavoriteComicStreamPlaylists'
@@ -46,7 +47,9 @@ export function addFavoriteComicStreamPlaylist(
   name: string,
   jobs: RemoteComicStreamJob[],
 ): FavoriteComicStreamPlaylist[] {
-  const trimmed = name.trim() || `漫畫列表 ${new Date().toLocaleString('zh-TW')}`
+  const trimmed =
+    name.trim() ||
+    defaultStreamFavoriteName(jobs, `漫畫列表 ${new Date().toLocaleString('zh-TW')}`)
   const entry: FavoriteComicStreamPlaylist = {
     id: `cpl_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     name: trimmed,

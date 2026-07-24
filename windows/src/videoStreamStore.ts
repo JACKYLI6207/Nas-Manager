@@ -7,6 +7,11 @@ export type RemoteStreamJob = {
   port: number
   relPath: string
   title: string
+  /**
+   * PC 顯示名稱（如「Steam Deck (區網)」）。
+   * 用於跨區網／Tailscale IP 對應同一台機器；舊收藏可能沒有此欄位。
+   */
+  pcName?: string
 }
 
 export const videoStreamSession = reactive({

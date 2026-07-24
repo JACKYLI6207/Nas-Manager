@@ -10,6 +10,7 @@ import {
   watch,
 } from 'vue'
 import { fetchRemoteComicPageImage, fetchRemoteComicPages } from '../api'
+import { resolveStreamJobHost } from '../resolveStreamJobHost'
 import {
   comicJobKey,
   comicStreamFailedIndices,
@@ -515,9 +516,18 @@ function onPageImageLoad(index: number) {
 
 async function openJob(job: RemoteComicStreamJob) {
   openingBusy.value = true
-  status.value = '正在載入頁面清單…'
+  status.value = '正在連線並載入頁面清單…'
   try {
-    const result = await fetchRemoteComicPages(job.host, job.port, job.relPath)
+    const resolved = await resolveStreamJobHost(job)
+    if (resolved.host !== job.host) {
+      const key = comicJobKey(job)
+      comicStreamSession.jobs = comicStreamSession.jobs.map((j) =>
+        comicJobKey(j) === key
+          ? { ...j, host: resolved.host, pcName: j.pcName ?? job.pcName }
+          : j,
+      )
+    }
+    const result = await fetchRemoteComicPages(resolved.host, resolved.port, resolved.relPath)
     readerSessionId += 1
     resetLocalReaderViewportState()
     estimatedPageHeight.value = 0
@@ -530,16 +540,16 @@ async function openJob(job: RemoteComicStreamJob) {
     loadQueue = []
     activeLoads = 0
 
-    activeJob.value = { ...job }
-    setCurrentComicStreamJob(job)
-    readerTitle.value = result.title || job.title
+    activeJob.value = { ...resolved }
+    setCurrentComicStreamJob(resolved)
+    readerTitle.value = result.title || resolved.title
     readerPages.value = result.pages.map((p) => ({
       index: p.index,
       caption: p.caption,
       entry: p.entry,
     }))
     readingActive.value = true
-    markComicStreamOpened(job, result.pages.length)
+    markComicStreamOpened(resolved, result.pages.length)
     status.value = ''
 
     await nextTick()

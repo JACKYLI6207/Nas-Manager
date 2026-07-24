@@ -19,6 +19,7 @@ import {
   renameFavoriteComicStreamPlaylist,
   type FavoriteComicStreamPlaylist,
 } from '../comicStreamPlaylistStorage'
+import { defaultStreamFavoriteName } from '../streamFavoriteName'
 import {
   formatComicStreamProgressLabel,
   hasComicStreamRecord,
@@ -84,11 +85,15 @@ function onClearQueue() {
 function onFavoriteCurrentList() {
   const jobs = getFullComicStreamQueue()
   if (jobs.length === 0) return
-  const suggested = `漫畫 ${new Date().toLocaleDateString('zh-TW')}`
-  const name = window.prompt('收藏列表名稱', suggested)
+  const suggested = defaultStreamFavoriteName(
+    jobs,
+    `漫畫 ${new Date().toLocaleDateString('zh-TW')}`,
+  )
+  const name = window.prompt('收藏列表名稱（可留空＝資料夾名）', suggested)
   if (name === null) return
-  favoritePlaylists.value = addFavoriteComicStreamPlaylist(name, jobs)
-  comicStreamLog(`已加入串流收藏：${name.trim() || suggested}`)
+  const finalName = name.trim() || suggested
+  favoritePlaylists.value = addFavoriteComicStreamPlaylist(finalName, jobs)
+  comicStreamLog(`已加入串流收藏：${finalName}`)
 }
 
 function onLoadFavorite(pl: FavoriteComicStreamPlaylist) {

@@ -8,7 +8,8 @@ import {
   comicFavoritePlaylistsRevision,
   loadFavoriteComicStreamPlaylists,
 } from '../comicStreamPlaylistStorage'
-import { computed } from 'vue'
+import { registerAndroidBackHandler } from '../androidBackStack'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
 
 const comicSubTabs: { key: ComicReadSubTab; label: string }[] = [
   { key: 'home', label: '閱讀主頁' },
@@ -28,6 +29,23 @@ const favCount = computed(() => {
 function setComicSubTab(tab: ComicReadSubTab) {
   comicReadSubTab.value = tab
 }
+
+let unregisterBack: (() => void) | null = null
+onMounted(() => {
+  unregisterBack = registerAndroidBackHandler(() => {
+    // 閱讀中由 LocalRead／StreamRead 優先處理
+    if (comicStreamReadSession.readingActive) return false
+    if (comicReadSubTab.value !== 'home') {
+      comicReadSubTab.value = 'home'
+      return true
+    }
+    return false
+  })
+})
+onBeforeUnmount(() => {
+  unregisterBack?.()
+  unregisterBack = null
+})
 </script>
 
 <template>

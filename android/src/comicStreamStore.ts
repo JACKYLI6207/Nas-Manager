@@ -1,6 +1,7 @@
 import { reactive, ref } from 'vue'
-import type { RemoteStreamJob } from './videoStreamStore'
 import { comicReadSubTab } from './comicReadUi'
+import { jobKey as streamJobKey } from './streamPlaylistStorage'
+import type { RemoteStreamJob } from './videoStreamStore'
 
 /** 與影片串流相同結構：host + port + relPath + title */
 export type RemoteComicStreamJob = RemoteStreamJob
@@ -92,7 +93,7 @@ export function removeFromComicStreamQueue(job: RemoteComicStreamJob) {
 }
 
 export function comicJobKey(job: RemoteComicStreamJob): string {
-  return `${job.host.trim().toLowerCase()}:${job.port}:${job.relPath}`
+  return streamJobKey(job)
 }
 
 /** 從列表點選：只更新 current，不重排 jobs 順序。sourceJobs 有值時整份替換。 */
