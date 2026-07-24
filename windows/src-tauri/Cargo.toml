@@ -56,6 +56,8 @@ get_if_addrs = "0.5"
 socket2 = "0.5"
 natord = "1.0.9"
 dunce = "1.0.5"
+encoding_rs = "0.8"
+chardetng = "0.1"
 tokio-util = { version = "0.7", features = ["io"] }
 trash = "5"
 arboard = "3.4"

@@ -1,5 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -34,17 +35,114 @@ fn external_player_exe(app: &AppHandle) -> Option<String> {
         .filter(|p| !p.trim().is_empty())
 }
 
-fn launch_external_player(app: &AppHandle, target: &str) -> CommandResult<()> {
+fn launch_external_player(
+    app: &AppHandle,
+    target: &str,
+    subtitle: Option<&Path>,
+) -> CommandResult<()> {
     if let Some(exe) = external_player_exe(app) {
-        Command::new(&exe)
-            .arg(target)
-            .spawn()
+        let mut cmd = Command::new(&exe);
+        cmd.arg(target);
+        if let Some(sub) = subtitle {
+            append_subtitle_arg(&mut cmd, &exe, sub);
+        }
+        cmd.spawn()
             .map_err(|e| CommandError::from("啟動外部播放器失敗", e))?;
         return Ok(());
     }
+    // 系統預設程式無法帶入字幕參數，僅開啟影片本身
     app.opener()
         .open_path(target, None::<&str>)
         .map_err(|e| CommandError::from("以系統預設程式開啟失敗", e))
+}
+
+/// 依外部播放器種類，附加載入外部字幕的命令列參數。
+fn append_subtitle_arg(cmd: &mut Command, exe: &str, subtitle: &Path) {
+    let exe_name = Path::new(exe)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let sub = subtitle.to_string_lossy().to_string();
+    if exe_name.contains("vlc") || exe_name.contains("mpv") {
+        cmd.arg(format!("--sub-file={sub}"));
+    } else if exe_name.contains("potplayer") {
+        cmd.arg(format!("/sub={sub}"));
+    } else if exe_name.contains("mpc") {
+        cmd.arg("/sub").arg(&sub);
+    }
+    // 其他/未知播放器：不帶字幕參數，避免被誤判為額外播放檔案
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteSubtitleResponse {
+    #[serde(default)]
+    found: bool,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    ext: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// 向 PC 查詢影片同資料夾的字幕，取回已轉為 UTF-8 的內容並寫入暫存檔（含 BOM）。
+/// 找不到、PC 版本過舊或任何錯誤時回傳 None（不影響影片播放）。
+async fn fetch_remote_subtitle_to_temp(host: &str, port: u16, rel_path: &str) -> Option<PathBuf> {
+    let path_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(rel_path.as_bytes());
+    let url = format!("http://{host}:{port}/api/v1/subtitle?path_b64={path_b64}");
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .ok()?;
+    let resp = client.get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: RemoteSubtitleResponse = resp.json().await.ok()?;
+    if !body.found {
+        return None;
+    }
+    let content = body.content?;
+    let ext = body.ext.unwrap_or_else(|| "srt".to_string());
+    let name = body.name.unwrap_or_else(|| format!("subtitle.{ext}"));
+    write_temp_subtitle(rel_path, &name, &content).ok()
+}
+
+fn write_temp_subtitle(video_rel: &str, name: &str, content: &str) -> std::io::Result<PathBuf> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let dir = std::env::temp_dir().join("nas-manager-subs");
+    std::fs::create_dir_all(&dir)?;
+    let mut hasher = DefaultHasher::new();
+    video_rel.hash(&mut hasher);
+    let prefix = format!("{:08x}", hasher.finish() as u32);
+    let file = dir.join(format!("{prefix}-{}", sanitize_subtitle_name(name)));
+    let mut bytes = Vec::with_capacity(content.len() + 3);
+    bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]); // UTF-8 BOM：讓播放器正確辨識編碼，避免中文亂碼
+    bytes.extend_from_slice(content.as_bytes());
+    std::fs::write(&file, bytes)?;
+    Ok(file)
+}
+
+fn sanitize_subtitle_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        "subtitle.srt".to_string()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 #[tauri::command]
@@ -155,7 +253,12 @@ pub fn play_local_video_file(
             background: false,
         });
     }
-    if let Err(e) = launch_external_player(&app, &uri) {
+    let subtitle_path = _subtitle_uris
+        .as_ref()
+        .and_then(|list| list.iter().find(|s| !s.trim().is_empty()))
+        .map(PathBuf::from)
+        .filter(|p| p.is_file());
+    if let Err(e) = launch_external_player(&app, &uri, subtitle_path.as_deref()) {
         return Ok(PlayVideoResult {
             error: Some(e.err_message),
             background: false,
@@ -262,11 +365,18 @@ pub async fn play_remote_pc_video(
         });
     }
 
+    // 自動於 PC 同資料夾尋找此影片的字幕，下載並轉碼為 UTF-8 暫存檔後帶入播放器。
+    let subtitle_path = fetch_remote_subtitle_to_temp(&host, port, &rel_path).await;
+
     emit_video_stream_prep(
         &app,
         VideoStreamPrepProgressEvent {
             phase: "launching".into(),
-            message: "正在啟動外部播放器…".into(),
+            message: if subtitle_path.is_some() {
+                "已載入字幕，正在啟動外部播放器…".into()
+            } else {
+                "正在啟動外部播放器…".into()
+            },
             bytes_done: 0,
             bytes_total: 0,
             speed_bps: 0,
@@ -275,7 +385,7 @@ pub async fn play_remote_pc_video(
         },
     );
 
-    if let Err(e) = launch_external_player(&app, &stream_url) {
+    if let Err(e) = launch_external_player(&app, &stream_url, subtitle_path.as_deref()) {
         emit_video_stream_prep(
             &app,
             VideoStreamPrepProgressEvent {

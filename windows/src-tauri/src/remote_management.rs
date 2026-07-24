@@ -693,6 +693,7 @@ async fn start_async(app: &AppHandle, config: &Config) -> anyhow::Result<()> {
             )
             .route("/api/v1/download", get(download_handler).post(download_post_handler))
             .route("/api/v1/stream", get(stream_handler).post(stream_post_handler))
+            .route("/api/v1/subtitle", get(subtitle_handler).post(subtitle_post_handler))
             .route(
                 "/api/v1/comic/pages",
                 post(comic_pages_post_handler),
@@ -820,7 +821,7 @@ async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> 
         ok: true,
         app: "Nas Manager",
         version: env!("CARGO_PKG_VERSION"),
-        remote_api: 10,
+        remote_api: 11,
         share_mounts,
     })
 }
@@ -1458,6 +1459,190 @@ async fn serve_stream(
         .header(header::CONTENT_LENGTH, file_size.to_string())
         .body(body)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
+}
+
+/// 常見文字字幕副檔名（可轉碼為 UTF-8）。
+const SUBTITLE_EXTS: &[&str] = &["srt", "ass", "ssa", "vtt", "sub", "smi", "sami"];
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SubtitleResponse {
+    ok: bool,
+    found: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ext: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+}
+
+async fn subtitle_handler(
+    State(state): State<HttpState>,
+    Query(query): Query<StreamQuery>,
+) -> Result<Json<SubtitleResponse>, (StatusCode, String)> {
+    let rel = resolve_stream_rel_path(&query, None).map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+    serve_subtitle(&state, &rel).await
+}
+
+async fn subtitle_post_handler(
+    State(state): State<HttpState>,
+    Json(body): Json<RemotePathBody>,
+) -> Result<Json<SubtitleResponse>, (StatusCode, String)> {
+    let rel = resolve_stream_rel_path(&StreamQuery::default(), Some(&body.path))
+        .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+    serve_subtitle(&state, &rel).await
+}
+
+/// 給定影片相對路徑，於同資料夾自動尋找同名字幕，回傳已轉為 UTF-8 的字幕內容。
+async fn serve_subtitle(
+    state: &HttpState,
+    video_rel: &str,
+) -> Result<Json<SubtitleResponse>, (StatusCode, String)> {
+    let video_path = state
+        .resolve_under_share(video_rel)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    if !video_path.is_file() {
+        return Ok(Json(SubtitleResponse {
+            ok: true,
+            found: false,
+            name: None,
+            ext: None,
+            content: None,
+        }));
+    }
+    let found = tokio::task::spawn_blocking(move || find_and_load_subtitle(&video_path))
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match found {
+        Some((name, ext, content)) => Ok(Json(SubtitleResponse {
+            ok: true,
+            found: true,
+            name: Some(name),
+            ext: Some(ext),
+            content: Some(content),
+        })),
+        None => Ok(Json(SubtitleResponse {
+            ok: true,
+            found: false,
+            name: None,
+            ext: None,
+            content: None,
+        })),
+    }
+}
+
+/// 於影片所在資料夾尋找最合適的字幕檔（同名優先、偏好中文標記與 ass/srt），
+/// 讀取後偵測編碼並轉為 UTF-8 文字。回傳（檔名, 副檔名, UTF-8 內容）。
+fn find_and_load_subtitle(video_path: &Path) -> Option<(String, String, String)> {
+    let dir = video_path.parent()?;
+    let video_stem = video_path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())?;
+
+    struct Candidate {
+        score: i32,
+        path: PathBuf,
+        file_name: String,
+        ext: String,
+    }
+
+    let mut best: Option<Candidate> = None;
+    for entry in std::fs::read_dir(dir).ok()? {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        if !SUBTITLE_EXTS.contains(&ext.as_str()) {
+            continue;
+        }
+        let sub_stem_lower = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+
+        // 同名或以影片名為前綴（允許 .zh / .繁中 等語言後綴）才視為此影片的字幕
+        let name_matches = sub_stem_lower == video_stem
+            || sub_stem_lower.starts_with(&format!("{video_stem}."))
+            || sub_stem_lower.starts_with(&format!("{video_stem}_"))
+            || sub_stem_lower.starts_with(&format!("{video_stem}-"))
+            || sub_stem_lower.starts_with(&format!("{video_stem} "));
+        if !name_matches {
+            continue;
+        }
+
+        let mut score = 0;
+        if sub_stem_lower == video_stem {
+            score += 100;
+        }
+        if subtitle_has_chinese_marker(&sub_stem_lower) {
+            score += 40;
+        }
+        score += match ext.as_str() {
+            "ass" | "ssa" => 8,
+            "srt" => 6,
+            "vtt" => 4,
+            "smi" | "sami" => 2,
+            _ => 0,
+        };
+
+        if best.as_ref().map(|c| score > c.score).unwrap_or(true) {
+            let file_name = path
+                .file_name()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| format!("subtitle.{ext}"));
+            best = Some(Candidate {
+                score,
+                path: path.clone(),
+                file_name,
+                ext: ext.clone(),
+            });
+        }
+    }
+
+    let best = best?;
+    let bytes = std::fs::read(&best.path).ok()?;
+    let content = decode_subtitle_bytes(&bytes);
+    Some((best.file_name, best.ext, content))
+}
+
+fn subtitle_has_chinese_marker(stem_lower: &str) -> bool {
+    const ASCII_MARKERS: &[&str] = &[
+        "cht", "chs", "cn", "chi", "chinese", "zh", "big5", "gb", "gbk", "tc", "sc",
+        "hans", "hant", "zho",
+    ];
+    if ASCII_MARKERS.iter().any(|m| stem_lower.contains(m)) {
+        return true;
+    }
+    stem_lower.chars().any(|c| {
+        matches!(c, '繁' | '简' | '簡' | '中' | '双' | '雙' | '字' | '幕')
+    })
+}
+
+/// 偵測字幕位元組編碼並轉為 UTF-8 字串，避免中文亂碼（支援 UTF-8/16 BOM、GBK、Big5 等）。
+fn decode_subtitle_bytes(bytes: &[u8]) -> String {
+    if let Some(rest) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        return String::from_utf8_lossy(rest).into_owned();
+    }
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let (cow, _, _) = encoding_rs::UTF_16LE.decode(&bytes[2..]);
+        return cow.into_owned();
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let (cow, _, _) = encoding_rs::UTF_16BE.decode(&bytes[2..]);
+        return cow.into_owned();
+    }
+    let mut detector = chardetng::EncodingDetector::new();
+    detector.feed(bytes, true);
+    let encoding = detector.guess(None, true);
+    let (cow, _, _) = encoding.decode(bytes);
+    cow.into_owned()
 }
 
 async fn serve_download(
