@@ -1,6 +1,6 @@
 [package]
 name = "gentleman-manager-android"
-version = "0.1.0"
+version = "1.1.0"
 description = "Gentleman Manager Android"
 authors = ["Nas Manager Contributors"]
 edition = "2021"

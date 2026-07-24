@@ -84,6 +84,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     private var bandwidthMeter: DefaultBandwidthMeter? = null
     private var playbackError: String? = null
     private val extraSubtitleUris = mutableListOf<String>()
+    /** 本次自動載入的遠端字幕（切換串流列表時會移除，避免沿用上一集字幕）。 */
+    private val autoLoadedRemoteSubtitleUris = mutableSetOf<String>()
     private val ioExecutor = Executors.newSingleThreadExecutor()
 
     private var pcHost: String? = null
@@ -313,6 +315,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
 
         Toast.makeText(this, "正在準備字幕…", Toast.LENGTH_SHORT).show()
         ioExecutor.execute {
+            val autoName = runCatching { prepareAutoRemoteSubtitleIfNeeded() }.getOrNull()
             runCatching { convertAllSubtitleUris() }
                 .onFailure { e ->
                     runOnUiThread {
@@ -328,6 +331,9 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                         "已從 ${formatResumeTime(startMs)} 接續播放",
                         Toast.LENGTH_SHORT,
                     ).show()
+                }
+                if (!autoName.isNullOrBlank()) {
+                    Toast.makeText(this, "已自動載入遠端字幕：$autoName", Toast.LENGTH_SHORT).show()
                 }
                 VideoPlaybackForegroundService.start(this, titleHint)
                 alignPlaylistCurrentFromPlayback()
@@ -484,6 +490,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         applyVlcWindowBrightness()
 
         ioExecutor.execute {
+            val autoName = runCatching { prepareAutoRemoteSubtitleIfNeeded() }.getOrNull()
             val subs = convertSubtitleUriList(extraSubtitleUris.toList())
             runOnUiThread {
                 startVlcPlayWhenReady(vlcLayout) {
@@ -496,6 +503,9 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                             "已從 ${formatResumeTime(startMs)} 接續播放",
                             Toast.LENGTH_SHORT,
                         ).show()
+                    }
+                    if (!autoName.isNullOrBlank()) {
+                        Toast.makeText(this, "已自動載入遠端字幕：$autoName", Toast.LENGTH_SHORT).show()
                     }
                     VideoPlaybackForegroundService.start(this, titleHint)
                     startProgressSaving()
@@ -932,11 +942,20 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         pcHost = item.host
         pcPort = item.port
         pcRelPath = item.relPath
+        hasRemotePc = true
         titleHint = item.title
         playbackUri = Uri.parse(streamUrl)
         VideoStreamPlaylistStore.setCurrentRelPath(item.relPath)
+        // 切集：記憶體重建此集字幕清單，勿把清除結果寫回上一集的 prefs
+        autoLoadedRemoteSubtitleUris.clear()
+        extraSubtitleUris.clear()
         progressStorageKey =
             VideoProgressStore.key(pcHost, pcPort, pcRelPath, playbackUri.toString())
+        VideoSubtitlePrefStore.loadExternalUris(this, progressStorageKey).forEach { uri ->
+            if (!extraSubtitleUris.contains(uri)) {
+                extraSubtitleUris.add(uri)
+            }
+        }
         val vlc = vlcSession
         if (vlc != null) {
             if (!shouldUseVlcEngine(playbackUri!!, titleHint)) {
@@ -945,23 +964,37 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             }
             vlcBindingPlayer?.updateMediaItem(MediaItem.Builder().setUri(playbackUri!!).build())
             ioExecutor.execute {
+                val autoName = runCatching { prepareAutoRemoteSubtitleIfNeeded() }.getOrNull()
                 val subs = convertSubtitleUriList(extraSubtitleUris.toList())
                 runOnUiThread {
                     val startMs = VideoProgressStore.load(this, progressStorageKey)
                     vlc.play(playbackUri!!, startMs, subs)
                     refreshPlaylistSkipButtons()
                     Toast.makeText(this, "播放：${item.title}", Toast.LENGTH_SHORT).show()
+                    if (!autoName.isNullOrBlank()) {
+                        Toast.makeText(this, "已自動載入遠端字幕：$autoName", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
             return
         }
         val exo = player ?: return
-        applyMediaItem(exo, playbackUri!!, 0L, true)
-        refreshPlaylistSkipButtons()
-        if (streamPlaylistOpen) {
-            refreshStreamPlaylistPanel()
+        ioExecutor.execute {
+            val autoName = runCatching { prepareAutoRemoteSubtitleIfNeeded() }.getOrNull()
+            runCatching { convertAllSubtitleUris() }
+            runOnUiThread {
+                val startMs = VideoProgressStore.load(this, progressStorageKey)
+                applyMediaItem(exo, playbackUri!!, startMs, true)
+                refreshPlaylistSkipButtons()
+                if (streamPlaylistOpen) {
+                    refreshStreamPlaylistPanel()
+                }
+                Toast.makeText(this, "播放：${item.title}", Toast.LENGTH_SHORT).show()
+                if (!autoName.isNullOrBlank()) {
+                    Toast.makeText(this, "已自動載入遠端字幕：$autoName", Toast.LENGTH_SHORT).show()
+                }
+            }
         }
-        Toast.makeText(this, "播放：${item.title}", Toast.LENGTH_SHORT).show()
     }
 
     /** 隱藏 PlayerView 內建字幕（避免顯示未修正的 PGS），改用獨立 SubtitleView 疊加。 */
@@ -2013,6 +2046,95 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 串流播放時自動尋找同資料夾、與影片同名（或含語言後綴）的文字字幕並轉碼加入。
+     * 須在背景執行緒呼叫。成功時回傳檔名供 Toast；找不到或已有外掛字幕則回 null。
+     */
+    private fun prepareAutoRemoteSubtitleIfNeeded(): String? {
+        if (!hasRemotePc) return null
+        val host = pcHost ?: return null
+        val rel = pcRelPath ?: return null
+        // 若此影片已有任何外掛字幕（含上次記住的），不再自動再抓一份
+        if (extraSubtitleUris.isNotEmpty()) return null
+        val best = pickBestMatchingRemoteSubtitle(host, pcPort, rel) ?: return null
+        val (fileName, streamUrl) = best
+        val converted =
+            SubtitleCharsetHelper
+                .prepareUtf8SubtitleUri(
+                    this,
+                    Uri.parse(streamUrl),
+                    fileName,
+                    simpToTradEnabled,
+                ).toString()
+        if (extraSubtitleUris.contains(converted)) return null
+        extraSubtitleUris.add(converted)
+        autoLoadedRemoteSubtitleUris.add(converted)
+        persistExternalSubtitles()
+        return fileName
+    }
+
+    /** 挑選同資料夾內最合適的同名字幕（僅文字字幕；.sup 等點陣字幕不自動載入）。 */
+    private fun pickBestMatchingRemoteSubtitle(
+        host: String,
+        port: Int,
+        videoRelPath: String,
+    ): Pair<String, String>? {
+        val normalized = videoRelPath.replace('\\', '/')
+        val browsePath = normalized.substringBeforeLast('/', missingDelimiterValue = "")
+        val videoStem =
+            normalized
+                .substringAfterLast('/')
+                .substringBeforeLast('.', missingDelimiterValue = normalized)
+                .lowercase()
+        if (videoStem.isEmpty()) return null
+        val entries = browsePcDirectory(host, port, browsePath)
+        var best: Triple<Int, String, String>? = null
+        for ((name, isDir) in entries) {
+            if (isDir) continue
+            val ext = name.substringAfterLast('.', "").lowercase()
+            if (ext !in TEXT_SUBTITLE_EXTENSIONS) continue
+            val stem = name.substringBeforeLast('.', name).lowercase()
+            if (!subtitleStemMatchesVideo(stem, videoStem)) continue
+            var score = 0
+            if (stem == videoStem) score += 100
+            if (subtitleHasChineseMarker(stem)) score += 40
+            score +=
+                when (ext) {
+                    "ass", "ssa" -> 8
+                    "srt" -> 6
+                    "vtt" -> 4
+                    "smi", "sami" -> 2
+                    else -> 0
+                }
+            val apiPath =
+                if (browsePath.isEmpty()) name
+                else "$browsePath/$name"
+            val streamUrl = buildPcStreamUrl(host, port, apiPath)
+            if (best == null || score > best!!.first) {
+                best = Triple(score, name, streamUrl)
+            }
+        }
+        return best?.let { it.second to it.third }
+    }
+
+    private fun subtitleStemMatchesVideo(subStemLower: String, videoStemLower: String): Boolean {
+        return subStemLower == videoStemLower ||
+            subStemLower.startsWith("$videoStemLower.") ||
+            subStemLower.startsWith("${videoStemLower}_") ||
+            subStemLower.startsWith("$videoStemLower-") ||
+            subStemLower.startsWith("$videoStemLower ")
+    }
+
+    private fun subtitleHasChineseMarker(stemLower: String): Boolean {
+        val ascii =
+            arrayOf(
+                "cht", "chs", "cn", "chi", "chinese", "zh", "big5", "gb", "gbk",
+                "tc", "sc", "hans", "hant", "zho",
+            )
+        if (ascii.any { stemLower.contains(it) }) return true
+        return stemLower.any { it in "繁简簡中双雙字幕" }
+    }
+
     private fun listRemoteSubtitleCandidates(
         host: String,
         port: Int,
@@ -2036,7 +2158,13 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                         else "${browsePath.replace('\\', '/')}/${entry.first}"
                     val label = entry.first
                     val streamUrl = buildPcStreamUrl(host, port, apiPath)
-                    val score = if (entry.first.lowercase().startsWith(videoBase)) 0 else 1
+                    val stem = entry.first.substringBeforeLast('.', entry.first).lowercase()
+                    val score =
+                        when {
+                            stem == videoBase -> 0
+                            subtitleStemMatchesVideo(stem, videoBase) -> 1
+                            else -> 2
+                        }
                     Triple(score, label, streamUrl)
                 }
                 .sortedWith(compareBy({ it.first }, { it.second.lowercase() }))
@@ -2402,7 +2530,9 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             VideoPlaybackForegroundService.stop(context)
         }
 
-        private val SUBTITLE_EXTENSIONS = setOf("srt", "ass", "ssa", "vtt", "sub", "sup")
+        private val SUBTITLE_EXTENSIONS = setOf("srt", "ass", "ssa", "vtt", "sub", "sup", "smi", "sami")
+        /** 可自動轉碼載入的文字字幕（不含 .sup 等點陣字幕）。 */
+        private val TEXT_SUBTITLE_EXTENSIONS = setOf("srt", "ass", "ssa", "vtt", "sub", "smi", "sami")
         private const val KEY_PLAYBACK_POSITION = "playback_position"
         private const val DEFAULT_SUBTITLE_TEXT_SIZE_SP = 16f
         private const val MIN_SUBTITLE_TEXT_SIZE_SP = 8f
