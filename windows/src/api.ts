@@ -255,6 +255,10 @@ export function listRemotePcDirectory(host: string, port: number, path: string) 
   return invoke<RemotePcBrowseResult>('list_remote_pc_directory', { host, port, path })
 }
 
+export function listRemotePcFiles(host: string, port: number, path: string) {
+  return invoke<RemotePcFileItem[]>('list_remote_pc_files', { host, port, path })
+}
+
 export type RemotePcFileItem = {
   relativePath: string
   size: number
@@ -380,6 +384,18 @@ export function remotePcFileOp(
     destPath,
     newName,
   })
+}
+
+export function remotePcPasteWithProgress(host: string, port: number, destPath: string) {
+  return invoke<RemotePcFileOpResult>('remote_pc_paste_with_progress', {
+    host,
+    port,
+    destPath,
+  })
+}
+
+export function cancelRemotePcFileOp() {
+  return invoke<null>('cancel_remote_pc_file_op')
 }
 
 export async function listenRemoteTransferProgress(

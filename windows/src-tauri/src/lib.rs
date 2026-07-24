@@ -3,6 +3,7 @@ mod config;
 mod desktop_commands;
 mod errors;
 mod events;
+mod file_op_job;
 mod exe_icon;
 mod extensions;
 mod local_reader;
@@ -67,11 +68,14 @@ pub fn run() {
             leave_remote_wifi_mode,
             test_remote_pc_connection,
             list_remote_pc_directory,
+            list_remote_pc_files,
             fetch_remote_comic_pages,
             fetch_remote_comic_page_image,
             pick_remote_transfer_destination,
             transfer_remote_pc_files,
             cancel_remote_pc_transfer,
+            remote_pc_paste_with_progress,
+            cancel_remote_pc_file_op,
             pick_remote_upload_file,
             pick_remote_upload_folder,
             plan_remote_pc_upload,

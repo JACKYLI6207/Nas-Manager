@@ -220,6 +220,18 @@ pub async fn list_remote_pc_directory(
 
 #[tauri::command(async)]
 #[specta::specta]
+pub async fn list_remote_pc_files(
+    host: String,
+    port: u16,
+    path: String,
+) -> CommandResult<Vec<crate::pc_remote_discovery::RemotePcFileItem>> {
+    crate::pc_remote_discovery::list_remote_pc_files(&host, port, &path)
+        .await
+        .map_err(|err| CommandError::from("列出 PC 檔案失敗", err))
+}
+
+#[tauri::command(async)]
+#[specta::specta]
 pub async fn fetch_remote_comic_pages(
     host: String,
     port: u16,
@@ -288,6 +300,25 @@ pub async fn plan_remote_pc_upload(
 #[specta::specta]
 pub fn cancel_remote_pc_transfer() {
     crate::remote_pc_transfer::request_remote_transfer_cancel();
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub async fn remote_pc_paste_with_progress(
+    app: AppHandle,
+    host: String,
+    port: u16,
+    dest_path: String,
+) -> CommandResult<crate::remote_pc_file_op::RemotePcFileOpResult> {
+    crate::remote_pc_file_op::remote_pc_paste_with_progress(&app, &host, port, &dest_path)
+        .await
+        .map_err(|err| CommandError::from("PC 貼上失敗", err))
+}
+
+#[tauri::command(async)]
+#[specta::specta]
+pub fn cancel_remote_pc_file_op() {
+    crate::remote_pc_file_op::cancel_remote_pc_file_op();
 }
 
 #[tauri::command(async)]

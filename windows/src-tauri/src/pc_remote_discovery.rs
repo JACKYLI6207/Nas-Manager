@@ -26,6 +26,8 @@ const SUBNET_PROBE_TIMEOUT_MS: u64 = 250;
 const SUBNET_PROBE_CONCURRENCY: usize = 64;
 const SUBNET_FALLBACK_MAX_SECS: u64 = 5;
 const CONNECT_TIMEOUT_SECS: u64 = 5;
+/// 讀取 PC 目錄（慢硬碟、大量檔案可能需較久）
+const BROWSE_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -1129,32 +1131,54 @@ pub async fn list_remote_pc_directory(
     path: &str,
 ) -> anyhow::Result<RemotePcBrowseResult> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(BROWSE_TIMEOUT_SECS))
         .build()
-        .context("?? HTTP ?????")?;
-    let resp = client
-        .post(format!("http://{host}:{port}/api/v1/browse"))
-        .json(&json!({ "path": path }))
-        .send()
-        .await
-        .context("???? PC")?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("HTTP {status}{}", if body.is_empty() { String::new() } else { format!("?{body}") });
+        .context("建立 HTTP 用戶端失敗")?;
+    let url = format!("http://{host}:{port}/api/v1/browse");
+    let body_json = json!({ "path": path });
+
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..2u32 {
+        match client.post(&url).json(&body_json).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let text = resp.text().await.context("讀取目錄列表失敗")?;
+                let body: BrowseResponse =
+                    serde_json::from_str(&text).context("解析目錄列表失敗")?;
+                if !body.ok {
+                    anyhow::bail!("PC 回應異常");
+                }
+                let remote_api = fetch_remote_pc_api_version(host, port).await;
+                return Ok(RemotePcBrowseResult {
+                    path: body.path,
+                    path_display: body.path_display,
+                    entries: body.entries,
+                    remote_api,
+                });
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                anyhow::bail!(
+                    "HTTP {status}{}",
+                    if body.is_empty() {
+                        String::new()
+                    } else {
+                        format!("：{body}")
+                    }
+                );
+            }
+            Err(e) if e.is_timeout() && attempt == 0 => {
+                last_err = Some(e.into());
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e)).context("無法連線 PC");
+            }
+        }
     }
-    let text = resp.text().await.context("????????")?;
-    let body: BrowseResponse = serde_json::from_str(&text).context("????????")?;
-    if !body.ok {
-        anyhow::bail!("PC ????");
-    }
-    let remote_api = fetch_remote_pc_api_version(host, port).await;
-    Ok(RemotePcBrowseResult {
-        path: body.path,
-        path_display: body.path_display,
-        entries: body.entries,
-        remote_api,
-    })
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("連線失敗"))).context(
+        "讀取 PC 資料夾逾時。硬碟較慢時請稍候再試，或確認 PC 遠端管理仍在執行",
+    )
 }
 
 /// ?? PC ????????????????????????

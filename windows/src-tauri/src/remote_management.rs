@@ -701,6 +701,8 @@ async fn start_async(app: &AppHandle, config: &Config) -> anyhow::Result<()> {
             .route("/api/v1/upload-exists", post(upload_exists_post_handler))
             .route("/api/v1/upload", post(upload_post_handler))
             .route("/api/v1/file-op", post(file_op_post_handler))
+            .route("/api/v1/file-op/progress", get(file_op_progress_handler))
+            .route("/api/v1/file-op/cancel", post(file_op_cancel_handler))
             .with_state(http_state);
         if let Err(err) = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
@@ -818,7 +820,7 @@ async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> 
         ok: true,
         app: "Nas Manager",
         version: env!("CARGO_PKG_VERSION"),
-        remote_api: 9,
+        remote_api: 10,
         share_mounts,
     })
 }
@@ -1782,6 +1784,8 @@ struct FileOpBody {
     dest_path: String,
     #[serde(default)]
     new_name: String,
+    #[serde(default, rename = "async")]
+    async_op: bool,
 }
 
 #[derive(Serialize)]
@@ -2120,10 +2124,141 @@ fn fail_op(err: impl std::fmt::Display) -> FileOpResponse {
     }
 }
 
+fn execute_paste_with_progress(
+    state: &HttpState,
+    clip: &RemoteClipboard,
+    dest_dir: &Path,
+    ctx: &crate::file_op_job::ProgressCtx,
+) -> anyhow::Result<String> {
+    use crate::file_op_job::{copy_path_with_progress, move_path_with_progress, path_tree_bytes};
+
+    let file_count = clip.paths.len() as u32;
+    ctx.set_phase("scanning", "正在計算大小…");
+
+    let mut item_sizes = Vec::with_capacity(clip.paths.len());
+    let mut bytes_total = 0u64;
+    for (idx, rel) in clip.paths.iter().enumerate() {
+        ctx.check_cancelled()?;
+        let src = state.resolve_under_share(rel)?;
+        let size = path_tree_bytes(&src);
+        bytes_total = bytes_total.saturating_add(size);
+        item_sizes.push(size);
+        ctx.set_bytes_total(
+            bytes_total,
+            &format!("正在計算大小… ({}/{file_count})", idx + 1),
+        );
+    }
+
+    ctx.set_phase("pasting", "貼上中…");
+    let mut moved = 0usize;
+    for (idx, rel) in clip.paths.iter().enumerate() {
+        ctx.check_cancelled()?;
+        let src = state.resolve_under_share(rel)?;
+        let name = src
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "item".to_string());
+        ctx.set_file(idx as u32 + 1, file_count, &format!("貼上 {name}"));
+        let dst = unique_dest_path(dest_dir, &name);
+        let item_bytes = item_sizes[idx];
+        if clip.mode == RemoteClipboardMode::Cut {
+            move_path_with_progress(&src, &dst, ctx, item_bytes)?;
+        } else {
+            copy_path_with_progress(&src, &dst, ctx)?;
+        }
+        moved += 1;
+    }
+    if clip.mode == RemoteClipboardMode::Cut {
+        *remote_clipboard_slot().lock() = None;
+    }
+    Ok(format!("已貼上 {moved} 項"))
+}
+
+fn start_async_paste(state: HttpState, dest_path: &str) -> FileOpResponse {
+    use crate::file_op_job::{start_paste_job, FileOpJobProgress};
+
+    if crate::file_op_job::job_running() {
+        return fail_op(anyhow!("已有檔案操作進行中"));
+    }
+    let clip = remote_clipboard_slot().lock().clone();
+    let Some(clip) = clip else {
+        return fail_op(anyhow!("剪貼簿是空的，請先剪下或複製"));
+    };
+    let dest_rel = dest_path
+        .trim()
+        .trim_start_matches(['/', '\\'])
+        .replace('\\', "/");
+    let dest_dir = match state.resolve_browse_dir(&dest_rel) {
+        Ok(d) => d,
+        Err(e) => return fail_op(e),
+    };
+    for rel in &clip.paths {
+        if clip.mode == RemoteClipboardMode::Cut && is_subpath(rel, &dest_rel) {
+            return fail_op(anyhow!("無法貼到自身或子資料夾內"));
+        }
+        if let Err(e) = state.resolve_under_share(rel) {
+            return fail_op(e);
+        }
+    }
+    let file_count = clip.paths.len() as u32;
+    let initial = FileOpJobProgress {
+        phase: "scanning".to_string(),
+        file_index: 0,
+        file_count,
+        bytes_done: 0,
+        bytes_total: 0,
+        speed_bps: 0,
+        message: "正在計算大小…".to_string(),
+        finished: false,
+        error: None,
+    };
+    let state_for_job = state.clone();
+    if let Err(e) = start_paste_job(initial, move |ctx| {
+        execute_paste_with_progress(&state_for_job, &clip, &dest_dir, ctx)
+    }) {
+        return fail_op(e);
+    }
+    FileOpResponse {
+        ok: true,
+        message: "已開始貼上".to_string(),
+        clipboard_count: None,
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileOpProgressResponse {
+    progress: Option<crate::file_op_job::FileOpJobProgress>,
+}
+
+async fn file_op_progress_handler() -> Json<FileOpProgressResponse> {
+    Json(FileOpProgressResponse {
+        progress: crate::file_op_job::get_job_progress(),
+    })
+}
+
+#[derive(Serialize)]
+struct FileOpCancelResponse {
+    ok: bool,
+}
+
+async fn file_op_cancel_handler() -> Json<FileOpCancelResponse> {
+    crate::file_op_job::request_job_cancel();
+    Json(FileOpCancelResponse { ok: true })
+}
+
 async fn file_op_post_handler(
     State(state): State<HttpState>,
     Json(body): Json<FileOpBody>,
 ) -> Json<FileOpResponse> {
+    if body.action.trim().eq_ignore_ascii_case("paste") && body.async_op {
+        let state = state.clone();
+        let dest = body.dest_path.clone();
+        let resp = tokio::task::spawn_blocking(move || start_async_paste(state, &dest))
+            .await
+            .unwrap_or_else(|e| fail_op(anyhow!("{e}")));
+        return Json(resp);
+    }
     let state = state.clone();
     let body = body;
     let resp = tokio::task::spawn_blocking(move || execute_file_op(state, body))

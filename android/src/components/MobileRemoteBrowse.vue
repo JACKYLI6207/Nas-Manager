@@ -2,12 +2,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   cancelRemotePcTransfer,
+  cancelRemotePcFileOp,
   listRemotePcDirectory,
+  listRemotePcFiles,
   pickRemoteTransferDestination,
   pickRemoteUploadFile,
   pickRemoteUploadFolder,
   planRemotePcUpload,
   remotePcFileOp,
+  remotePcPasteWithProgress,
   transferRemotePcFiles,
   uploadRemotePcFiles,
   type RemotePcFileOpAction,
@@ -80,6 +83,9 @@ const uploadConflictList = ref<string[]>([])
 let pendingUploadConflictResolve: ((policy: RemoteUploadConflictPolicy | null) => void) | null =
   null
 const transferProgress = ref<RemoteTransferProgressEvent | null>(null)
+const transferStartedAt = ref(0)
+const transferElapsedTick = ref(0)
+let transferElapsedTimer: number | null = null
 const transferDebugLog = ref<string[]>([])
 const transferLogRef = ref<HTMLTextAreaElement | null>(null)
 const copyLogHint = ref('')
@@ -121,20 +127,59 @@ const transferErrorMessage = computed(() => {
 const transferOverlayTitle = computed(() => {
   const p = transferProgress.value
   if (!p) return ''
+  const isPaste =
+    p.phase === 'pasting' ||
+    p.phase === 'preparing' ||
+    p.phase === 'scanning' ||
+    p.phase === 'cancelling' ||
+    p.message.includes('貼上') ||
+    p.message.includes('計算大小')
   if (!p.finished) {
+    if (p.phase === 'scanning' || p.message.includes('計算大小')) return '正在計算大小'
+    if (isPaste) return '貼上中'
     return p.phase === 'uploading' || p.message.includes('上傳') ? '上傳中' : '下載中'
   }
   if (p.phase === 'cancelled') {
+    if (isPaste) return '貼上已取消'
     return p.message.includes('上傳') ? '上傳已取消' : '下載已取消'
   }
   if (p.phase === 'partial') {
     return p.message.includes('上傳') ? '上傳完成（部分失敗）' : '下載完成（部分失敗）'
   }
   if (p.error || p.phase === 'error') {
+    if (isPaste) return '貼上失敗'
     return p.message.includes('上傳') ? '上傳失敗' : '下載失敗'
   }
+  if (isPaste) return '貼上完成'
   return p.message.includes('上傳') ? '上傳完成' : '下載完成'
 })
+
+const transferElapsedText = computed(() => {
+  void transferElapsedTick.value
+  if (!transferStartedAt.value) return ''
+  const sec = Math.max(0, Math.floor((Date.now() - transferStartedAt.value) / 1000))
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return m > 0 ? `用時 ${m}:${String(s).padStart(2, '0')}` : `用時 ${sec} 秒`
+})
+
+function startOverlayElapsedTimer() {
+  transferStartedAt.value = Date.now()
+  transferElapsedTick.value = 0
+  if (transferElapsedTimer != null) {
+    window.clearInterval(transferElapsedTimer)
+  }
+  transferElapsedTimer = window.setInterval(() => {
+    transferElapsedTick.value++
+  }, 1000)
+}
+
+function stopOverlayElapsedTimer() {
+  if (transferElapsedTimer != null) {
+    window.clearInterval(transferElapsedTimer)
+    transferElapsedTimer = null
+  }
+}
 
 const transferDebugText = computed(() => {
   const parts = [...transferDebugLog.value]
@@ -277,15 +322,34 @@ function formatSpeed(bps: number): string {
   return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`
 }
 
-/** 列表右側：根目錄磁碟「剩餘/總容量」或檔案/資料夾大小 */
-function entrySecondaryLabel(entry: RemotePcDirEntry): string {
-  if (
+/** 根目錄分享槽是否顯示磁碟容量（含進度條） */
+function entryHasDiskCapacity(entry: RemotePcDirEntry): boolean {
+  return (
     isBrowseRoot.value &&
     entry.isDir &&
     entry.diskFreeBytes != null &&
-    entry.diskTotalBytes != null
-  ) {
-    return `${formatSize(entry.diskFreeBytes)} / ${formatSize(entry.diskTotalBytes)}`
+    entry.diskTotalBytes != null &&
+    entry.diskTotalBytes > 0
+  )
+}
+
+function entryDiskCapacityLabel(entry: RemotePcDirEntry): string {
+  if (!entryHasDiskCapacity(entry)) return ''
+  return `剩餘 ${formatSize(entry.diskFreeBytes!)}，共 ${formatSize(entry.diskTotalBytes!)}`
+}
+
+function entryDiskUsedPercent(entry: RemotePcDirEntry): number {
+  if (!entryHasDiskCapacity(entry)) return 0
+  const total = entry.diskTotalBytes!
+  const free = entry.diskFreeBytes!
+  const used = Math.max(0, total - free)
+  return Math.min(100, Math.round((used / total) * 100))
+}
+
+/** 列表右側：檔案/資料夾大小（根目錄磁碟容量另用 entryDiskCapacityLabel） */
+function entrySecondaryLabel(entry: RemotePcDirEntry): string {
+  if (entryHasDiskCapacity(entry)) {
+    return ''
   }
   if (entry.size != null) {
     return formatSize(entry.size)
@@ -414,76 +478,102 @@ function closeActionMenus() {
   closeLayoutMenu()
 }
 
-function collectSelectedVideoJobs() {
+type StreamJob = { host: string; port: number; relPath: string; title: string }
+
+async function collectStreamJobsFromSelection(
+  matchFile: (name: string) => boolean,
+): Promise<StreamJob[]> {
   const h = host.value
   if (!h) return []
-  const jobs: { host: string; port: number; relPath: string; title: string }[] = []
-  for (const path of selectedItems.value.keys()) {
-    const name = baseName(path)
-    if (!isVideoFile(name)) continue
-    jobs.push({
-      host: h,
-      port: props.pc.port,
-      relPath: path,
-      title: name,
-    })
+  const paths = Array.from(selectedItems.value.keys())
+  if (paths.length === 0) return []
+
+  const lists = await Promise.all(
+    paths.map((path) => listRemotePcFiles(h, props.pc.port, path)),
+  )
+
+  const seen = new Set<string>()
+  const jobs: StreamJob[] = []
+  for (const files of lists) {
+    for (const file of files) {
+      const relPath = file.relativePath.replace(/\\/g, '/')
+      const name = baseName(relPath)
+      if (!matchFile(name) || seen.has(relPath)) continue
+      seen.add(relPath)
+      jobs.push({
+        host: h,
+        port: props.pc.port,
+        relPath,
+        title: name,
+      })
+    }
   }
+  jobs.sort((a, b) =>
+    a.relPath.localeCompare(b.relPath, undefined, { numeric: true, sensitivity: 'base' }),
+  )
   return jobs
 }
 
-function collectSelectedComicJobs() {
-  const h = host.value
-  if (!h) return []
-  const jobs: { host: string; port: number; relPath: string; title: string }[] = []
-  for (const path of selectedItems.value.keys()) {
-    const name = baseName(path)
-    if (!isComicZipFile(name)) continue
-    jobs.push({
-      host: h,
-      port: props.pc.port,
-      relPath: path,
-      title: name,
-    })
-  }
-  return jobs
-}
-
-function startStreamRead() {
+async function startStreamRead() {
   closeActionMenus()
   const h = host.value
   if (!h) {
     showFlashHint('未連線 PC')
     return
   }
-  const jobs = collectSelectedComicJobs()
-  if (jobs.length === 0) {
-    showFlashHint('請勾選 ZIP/CBZ 漫畫檔')
+  if (selectedItems.value.size === 0) {
+    showFlashHint('請勾選 ZIP/CBZ 漫畫或資料夾')
     return
   }
-  queueRemoteComicStreamPlay(jobs)
-  comicStreamLog(`來源 PC：${h}:${props.pc.port}`)
-  if (jobs.length === 1) {
-    activateComicStreamQueueJob(jobs[0]!, jobs)
-  } else {
-    requestNavigateToComicStream()
+  remoteBusy.value = true
+  try {
+    showFlashHint('正在掃描漫畫檔…', 2500)
+    const jobs = await collectStreamJobsFromSelection(isComicZipFile)
+    if (jobs.length === 0) {
+      showFlashHint('所選項目內沒有可串流閱讀的 ZIP/CBZ')
+      return
+    }
+    queueRemoteComicStreamPlay(jobs)
+    comicStreamLog(`來源 PC：${h}:${props.pc.port}（${jobs.length} 本）`)
+    if (jobs.length === 1) {
+      activateComicStreamQueueJob(jobs[0]!, jobs)
+    } else {
+      requestNavigateToComicStream()
+    }
+  } catch (e) {
+    showFlashHint(formatInvokeError(e), 2800)
+  } finally {
+    remoteBusy.value = false
   }
 }
 
-function startStreamPlay() {
+async function startStreamPlay() {
   closeActionMenus()
   const h = host.value
   if (!h) {
     showFlashHint('未連線 PC')
     return
   }
-  const jobs = collectSelectedVideoJobs()
-  if (jobs.length === 0) {
-    showFlashHint('請勾選要播放的影片檔')
+  if (selectedItems.value.size === 0) {
+    showFlashHint('請勾選影片檔或資料夾')
     return
   }
-  queueRemoteStreamPlay(jobs)
-  streamLog(`來源 PC：${h}:${props.pc.port}`)
-  requestNavigateToVideoTab()
+  remoteBusy.value = true
+  try {
+    showFlashHint('正在掃描影片…', 2500)
+    const jobs = await collectStreamJobsFromSelection(isVideoFile)
+    if (jobs.length === 0) {
+      showFlashHint('所選項目內沒有可播放的影片')
+      return
+    }
+    queueRemoteStreamPlay(jobs)
+    streamLog(`來源 PC：${h}:${props.pc.port}（${jobs.length} 部）`)
+    requestNavigateToVideoTab()
+  } catch (e) {
+    showFlashHint(formatInvokeError(e), 2800)
+  } finally {
+    remoteBusy.value = false
+  }
 }
 
 function goUp() {
@@ -537,6 +627,7 @@ async function startUpload(kind: 'file' | 'folder') {
     remoteBusy.value = true
     transferDebugLog.value = []
     appendTransferLog(`開始上傳 → PC ${host.value}:${props.pc.port}（${pathLabel.value}）`)
+    startOverlayElapsedTimer()
     transferProgress.value = {
       phase: 'uploading',
       fileIndex: 0,
@@ -587,6 +678,7 @@ async function startDownload() {
   remoteBusy.value = true
   transferDebugLog.value = []
   appendTransferLog(`開始下載 → PC ${host.value}:${props.pc.port}`)
+  startOverlayElapsedTimer()
   transferProgress.value = {
     phase: 'collecting',
     fileIndex: 0,
@@ -635,15 +727,66 @@ function closeTransferOverlay() {
   transferProgress.value = null
   transferDebugLog.value = []
   copyLogHint.value = ''
+  stopOverlayElapsedTimer()
+  transferStartedAt.value = 0
 }
 
 async function cancelActiveTransfer() {
   if (!transferProgress.value || transferProgress.value.finished) return
-  appendTransferLog('使用者要求取消傳輸…')
+  const p = transferProgress.value
+  const isPaste =
+    p.phase === 'pasting' || p.phase === 'preparing' || p.phase === 'scanning' || p.phase === 'cancelling'
+  appendTransferLog(isPaste ? '使用者要求取消貼上…' : '使用者要求取消傳輸…')
   try {
-    await cancelRemotePcTransfer()
+    if (isPaste) {
+      await cancelRemotePcFileOp()
+    } else {
+      await cancelRemotePcTransfer()
+    }
   } catch (e) {
     appendTransferLog(`取消指令失敗：${formatInvokeError(e)}`)
+  }
+}
+
+async function startPaste() {
+  if (!host.value || remoteBusy.value) return
+  remoteBusy.value = true
+  transferDebugLog.value = []
+  appendTransferLog(`開始貼上 → PC ${host.value}:${props.pc.port}（${pathLabel.value}）`)
+  startOverlayElapsedTimer()
+  transferProgress.value = {
+    phase: 'preparing',
+    fileIndex: 0,
+    fileCount: 0,
+    bytesDone: 0,
+    bytesTotal: 0,
+    speedBps: 0,
+    message: '準備貼上…',
+    finished: false,
+    error: null,
+  }
+  try {
+    await remotePcPasteWithProgress(host.value, props.pc.port, currentPath.value)
+    await loadDirectory(currentPath.value)
+  } catch (e) {
+    const errText = formatInvokeError(e)
+    appendTransferLog(`貼上 invoke 失敗：${errText}`)
+    console.error('[remote-paste]', e)
+    if (!transferProgress.value?.finished) {
+      transferProgress.value = {
+        phase: 'error',
+        fileIndex: transferProgress.value?.fileIndex ?? 0,
+        fileCount: transferProgress.value?.fileCount ?? 0,
+        bytesDone: transferProgress.value?.bytesDone ?? 0,
+        bytesTotal: transferProgress.value?.bytesTotal ?? 0,
+        speedBps: 0,
+        message: errText,
+        finished: true,
+        error: errText,
+      }
+    }
+  } finally {
+    remoteBusy.value = false
   }
 }
 
@@ -678,11 +821,14 @@ async function runFileOp(action: RemotePcFileOpAction) {
     return
   }
 
+  if (action === 'paste') {
+    await startPaste()
+    return
+  }
+
   remoteBusy.value = true
   try {
-    if (action === 'paste') {
-      // 貼上至目前 PC 目錄
-    } else if (paths.length === 0) {
+    if (paths.length === 0) {
       showFlashHint('請先勾選項目')
       return
     }
@@ -871,6 +1017,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   document.removeEventListener('click', onDocumentClickForLayoutMenu)
   unlistenTransfer?.()
+  stopOverlayElapsedTimer()
   if (flashHintTimer != null) {
     window.clearTimeout(flashHintTimer)
   }
@@ -1009,8 +1156,8 @@ watch(
         <span class="remote-browse-pc">{{ displayPcName }}</span>
         <span class="remote-browse-path">{{ pathLabel }}</span>
         <span class="remote-browse-hint"
-          >勾選後「操作」剪下/複製/貼上/刪除/重新命名/新建資料夾；「傳輸」上傳/下載；勾選 ZIP/CBZ 後「串流 →
-          串流閱讀」、勾選影片後「串流 → 串流播放」（漫畫閱讀需 PC remote_api≥8）</span
+          >勾選後「操作」剪下/複製/貼上/刪除/重新命名/新建資料夾；「傳輸」上傳/下載；勾選 ZIP/CBZ 或資料夾後「串流 →
+          串流閱讀」、勾選影片或資料夾後「串流 → 串流播放」（漫畫閱讀需 PC remote_api≥8）</span
         >
       </div>
     </div>
@@ -1053,7 +1200,18 @@ watch(
                 entry.isDir ? '📁' : isVideoFile(entry.name) ? '🎬' : '📄'
               }}</span>
               <span class="remote-browse-name">{{ entryLabel(entry) }}</span>
-              <span v-if="entrySecondaryLabel(entry)" class="remote-browse-size">
+              <div v-if="entryHasDiskCapacity(entry)" class="remote-browse-disk-cap">
+                <div class="remote-browse-disk-cap-inner">
+                  <div class="remote-browse-disk-bar" aria-hidden="true">
+                    <div
+                      class="remote-browse-disk-bar-fill"
+                      :style="{ width: `${entryDiskUsedPercent(entry)}%` }"
+                    />
+                  </div>
+                  <span class="remote-browse-disk-text">{{ entryDiskCapacityLabel(entry) }}</span>
+                </div>
+              </div>
+              <span v-else-if="entrySecondaryLabel(entry)" class="remote-browse-size">
                 {{ entrySecondaryLabel(entry) }}
               </span>
             </button>
@@ -1106,7 +1264,18 @@ watch(
             <span class="remote-browse-grid-name" :title="entryLabel(entry)">{{
               entryLabel(entry)
             }}</span>
-            <span v-if="entrySecondaryLabel(entry)" class="remote-browse-grid-size">{{
+            <div v-if="entryHasDiskCapacity(entry)" class="remote-browse-disk-cap remote-browse-disk-cap--grid">
+              <div class="remote-browse-disk-cap-inner">
+                <div class="remote-browse-disk-bar" aria-hidden="true">
+                  <div
+                    class="remote-browse-disk-bar-fill"
+                    :style="{ width: `${entryDiskUsedPercent(entry)}%` }"
+                  />
+                </div>
+                <span class="remote-browse-disk-text">{{ entryDiskCapacityLabel(entry) }}</span>
+              </div>
+            </div>
+            <span v-else-if="entrySecondaryLabel(entry)" class="remote-browse-grid-size">{{
               entrySecondaryLabel(entry)
             }}</span>
           </button>
@@ -1285,6 +1454,7 @@ watch(
           {{ formatSize(transferProgress.bytesDone) }} / {{ formatSize(transferProgress.bytesTotal) }}
           <span v-if="transferProgress.speedBps > 0"> · {{ formatSpeed(transferProgress.speedBps) }}</span>
         </p>
+        <p v-if="transferStartedAt > 0" class="remote-transfer-detail">{{ transferElapsedText }}</p>
         <div
           v-if="transferProgress.bytesTotal > 0"
           class="remote-transfer-bar"
@@ -1830,6 +2000,63 @@ watch(
   flex-shrink: 0;
   font-size: 11px;
   opacity: 0.65;
+}
+
+.remote-browse-disk-cap {
+  flex: 0 0 33.333%;
+  max-width: 33.333%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  align-self: center;
+  padding-left: 6px;
+  box-sizing: border-box;
+}
+
+.remote-browse-disk-cap-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: 100%;
+  max-width: 100%;
+}
+
+.remote-browse-disk-cap--grid {
+  flex: none;
+  width: 100%;
+  max-width: 100%;
+  margin-top: 6px;
+  padding-left: 0;
+  align-items: center;
+}
+
+.remote-browse-disk-bar {
+  width: 100%;
+  flex-shrink: 0;
+  height: clamp(7px, 1.8vw, 9px);
+  border: 1px solid rgba(100, 149, 237, 0.45);
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.remote-browse-disk-bar-fill {
+  height: 100%;
+  background: linear-gradient(180deg, #5b9bd5 0%, #4a90d9 100%);
+}
+
+.remote-browse-disk-text {
+  font-size: clamp(8px, 2.35vw, 10px);
+  line-height: 1.2;
+  opacity: 0.78;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.remote-browse-disk-cap--grid .remote-browse-disk-text {
+  text-align: center;
+  font-size: clamp(8px, 2.35vw, 10px);
 }
 
 .remote-browse-empty {
