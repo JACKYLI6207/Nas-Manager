@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 
 $RepoRoot = $PSScriptRoot
 $WindowsRoot = Join-Path $RepoRoot 'windows'
-$version = '1.0.0'
+$version = '1.1.0'
 $pkgJson = Join-Path $WindowsRoot 'package.json'
 if (Test-Path $pkgJson) {
     $pkg = Get-Content $pkgJson -Raw | ConvertFrom-Json

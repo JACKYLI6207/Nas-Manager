@@ -104,6 +104,8 @@ async fn fetch_remote_subtitle_to_temp(host: &str, port: u16, rel_path: &str) ->
         return None;
     }
     let content = body.content?;
+    // 簡體字幕自動轉為臺灣繁體，已是繁體時大致維持不變。
+    let content = zhconv::zhconv(&content, zhconv::Variant::ZhTW);
     let ext = body.ext.unwrap_or_else(|| "srt".to_string());
     let name = body.name.unwrap_or_else(|| format!("subtitle.{ext}"));
     write_temp_subtitle(rel_path, &name, &content).ok()
