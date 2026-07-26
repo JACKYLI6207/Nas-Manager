@@ -1,6 +1,7 @@
 package com.gentleman.manager.android
 
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -122,6 +123,9 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     private var streamPlaylistPanel: ScrollView? = null
     private var streamPlaylistListHost: LinearLayout? = null
     private var streamPlaylistOpen = false
+    /** 0=跟隨系統, 1=直版鎖定, 2=橫向鎖定 */
+    private var orientationLockMode = 0
+    private var orientationButtonRef: ImageButton? = null
     private var vlcSession: NasVlcPlayerSession? = null
     private var vlcBindingPlayer: VlcBindingPlayer? = null
     private var vlcVideoLayoutRef: VLCVideoLayout? = null
@@ -155,6 +159,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         subtitleTextSizeSp = VideoSubtitlePrefStore.loadTextSizeSp(this)
         subtitlePgsScale = VideoSubtitlePrefStore.loadPgsScale(this)
         simpToTradEnabled = VideoSubtitlePrefStore.loadSimpToTrad(this)
+        orientationLockMode = VideoSubtitlePrefStore.loadOrientationLockMode(this)
+        applyOrientationLock(orientationLockMode, showToast = false)
         intent.getStringArrayExtra(EXTRA_SUBTITLE_URIS)?.filter { it.isNotBlank() }?.let {
             extraSubtitleUris.addAll(it)
         }
@@ -269,6 +275,16 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                     }
                     if (playbackState == Player.STATE_ENDED) {
                         VideoProgressStore.clear(this@LocalVideoPlayerActivity, progressStorageKey)
+                        // 有串流清單時自動播下一集；無清單／已是最後一集才結束
+                        if (
+                            VideoStreamPlaylistStore.isPlaylistMode() &&
+                                VideoStreamPlaylistStore.hasNext()
+                        ) {
+                            VideoStreamPlaylistStore.getNext()?.let { next ->
+                                playStreamPlaylistItem(next)
+                                return
+                            }
+                        }
                         finishWithResult(null)
                     }
                 }
@@ -441,7 +457,20 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                     videoLayout = vlcLayout,
                     onEnded = {
                         VideoProgressStore.clear(this, progressStorageKey)
-                        finishWithResult(null)
+                        val next =
+                            if (
+                                VideoStreamPlaylistStore.isPlaylistMode() &&
+                                    VideoStreamPlaylistStore.hasNext()
+                            ) {
+                                VideoStreamPlaylistStore.getNext()
+                            } else {
+                                null
+                            }
+                        if (next != null) {
+                            playStreamPlaylistItem(next)
+                        } else {
+                            finishWithResult(null)
+                        }
                     },
                     onError = { code ->
                         playbackError = code
@@ -613,6 +642,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 showVideoSettingsMenu()
             }
             ensureSubtitleButtonInteractive(control)
+            setupOrientationToggleButton(control)
             setupStreamPlaylistButton(control)
             setupPlaylistSkipButtons(control)
         }
@@ -786,11 +816,80 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 showVideoSettingsMenu()
             }
             ensureSubtitleButtonInteractive(playerView)
+            setupOrientationToggleButton(playerView)
             setupStreamPlaylistButton(playerView)
             setupPlaylistSkipButtons(playerView)
             applySubtitleTextSize(subtitleTextSizeSp)
             updateEmbeddedSubtitleLayout()
         }
+    }
+
+    private fun setupOrientationToggleButton(root: View) {
+        val btn = root.findViewById<ImageButton>(R.id.nas_exo_orientation) ?: return
+        orientationButtonRef = btn
+        btn.visibility = View.VISIBLE
+        btn.setImageResource(R.drawable.ic_nas_screen_rotation)
+        btn.imageTintList = android.content.res.ColorStateList.valueOf(0xFFFFFFFF.toInt())
+        btn.contentDescription = "畫面方向（點擊選擇）"
+        btn.setOnClickListener { showOrientationModePopup(btn) }
+    }
+
+    /** 按一下向上彈出列表，選擇直版／橫向／跟隨系統（非輪切） */
+    private fun showOrientationModePopup(anchor: View) {
+        val labels = arrayOf("跟隨系統旋轉", "直版鎖定", "橫向鎖定")
+        try {
+            val popup =
+                android.widget.PopupMenu(
+                    this,
+                    anchor,
+                    android.view.Gravity.TOP or android.view.Gravity.END,
+                )
+            labels.forEachIndexed { index, label ->
+                val item = popup.menu.add(0, index, index, label)
+                item.isCheckable = true
+                item.isChecked = index == orientationLockMode
+            }
+            popup.menu.setGroupCheckable(0, true, true)
+            popup.setOnMenuItemClickListener { item ->
+                applyOrientationLock(item.itemId)
+                true
+            }
+            popup.show()
+        } catch (_: Exception) {
+            AlertDialog.Builder(this)
+                .setTitle("畫面方向")
+                .setSingleChoiceItems(labels, orientationLockMode) { dialog, which ->
+                    applyOrientationLock(which)
+                    dialog.dismiss()
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        }
+    }
+
+    private fun applyOrientationLock(mode: Int, showToast: Boolean = true) {
+        orientationLockMode = mode.coerceIn(0, 2)
+        VideoSubtitlePrefStore.saveOrientationLockMode(this, orientationLockMode)
+        when (orientationLockMode) {
+            1 -> {
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                if (showToast) Toast.makeText(this, "直版鎖定", Toast.LENGTH_SHORT).show()
+            }
+            2 -> {
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+                if (showToast) Toast.makeText(this, "橫向鎖定", Toast.LENGTH_SHORT).show()
+            }
+            else -> {
+                requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR
+                if (showToast) Toast.makeText(this, "跟隨系統旋轉", Toast.LENGTH_SHORT).show()
+            }
+        }
+        orientationButtonRef?.contentDescription =
+            when (orientationLockMode) {
+                1 -> "畫面方向：直版鎖定"
+                2 -> "畫面方向：橫向鎖定"
+                else -> "畫面方向：跟隨系統"
+            }
     }
 
     private fun setupStreamPlaylistButton(root: View) {
@@ -860,10 +959,12 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 visibility = View.GONE
                 isFillViewport = false
                 setBackgroundColor(0xE6000000.toInt())
+                // 固定最大高度才能在長清單內捲動並停在當前集
+                val maxH = (resources.displayMetrics.heightPixels * 0.55f).toInt()
                 layoutParams =
                     FrameLayout.LayoutParams(
                         (resources.displayMetrics.widthPixels * 0.72f).toInt(),
-                        FrameLayout.LayoutParams.WRAP_CONTENT,
+                        maxH,
                         android.view.Gravity.BOTTOM or android.view.Gravity.END,
                     ).apply {
                         val margin =
@@ -898,7 +999,9 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         streamPlaylistOpen = !streamPlaylistOpen
         streamPlaylistPanel?.visibility = if (streamPlaylistOpen) View.VISIBLE else View.GONE
         if (streamPlaylistOpen) {
+            alignPlaylistCurrentFromPlayback()
             refreshStreamPlaylistPanel()
+            scrollPlaylistPanelToCurrent()
         }
     }
 
@@ -924,6 +1027,10 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                     isAllCaps = false
                     textAlignment = View.TEXT_ALIGNMENT_TEXT_START
                     setOnClickListener { playStreamPlaylistItem(item) }
+                    if (playing) {
+                        setBackgroundColor(0xFF2A4A6E.toInt())
+                        setTextColor(0xFFFFFFFF.toInt())
+                    }
                 }
             host.addView(
                 row,
@@ -932,6 +1039,19 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                     LinearLayout.LayoutParams.WRAP_CONTENT,
                 ).apply { bottomMargin = 6 },
             )
+        }
+    }
+
+    /** 開啟清單時捲動到目前播放集數並置於可見區 */
+    private fun scrollPlaylistPanelToCurrent() {
+        val panel = streamPlaylistPanel ?: return
+        val host = streamPlaylistListHost ?: return
+        val idx = VideoStreamPlaylistStore.currentIndex()
+        if (idx < 0 || idx >= host.childCount) return
+        val child = host.getChildAt(idx) ?: return
+        panel.post {
+            val target = (child.top - panel.height / 3).coerceAtLeast(0)
+            panel.smoothScrollTo(0, target)
         }
     }
 

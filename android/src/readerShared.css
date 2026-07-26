@@ -138,7 +138,8 @@
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  overflow-anchor: auto;
+  /* 長列表頁高變動改由 readerPageLayout 補償，關閉容器級 anchor */
+  overflow-anchor: none;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -208,6 +209,8 @@
   padding: 0;
   line-height: 0;
   font-size: 0;
+  /* 手動補償 scrollTop，避免與 WebView overflow-anchor 雙重校正 */
+  overflow-anchor: none;
 }
 
 .reader-img {

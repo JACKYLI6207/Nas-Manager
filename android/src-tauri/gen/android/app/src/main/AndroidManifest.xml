@@ -17,19 +17,28 @@
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:theme="@style/Theme.gentleman_manager_android"
-        android:usesCleartextTraffic="${usesCleartextTraffic}">
+        android:usesCleartextTraffic="${usesCleartextTraffic}"
+        android:resizeableActivity="true">
+        <!-- ColorOS／分屏：明確宣告可調整視窗，避免「暫不支援調整視窗大小」 -->
         <activity
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|density|fontScale"
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:resizeableActivity="true"
+            android:supportsPictureInPicture="false">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
                 <!-- AndroidTV support -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
+            <layout
+                android:defaultWidth="400dp"
+                android:defaultHeight="600dp"
+                android:minWidth="320dp"
+                android:minHeight="240dp" />
         </activity>
 
         <activity
@@ -37,8 +46,9 @@
             android:exported="false"
             android:launchMode="singleTask"
             android:taskAffinity="com.gentleman.manager.android.videoplayer"
-            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize|density|fontScale"
             android:screenOrientation="sensor"
+            android:resizeableActivity="true"
             android:theme="@style/Theme.NasVideoPlayer.Fullscreen" />
 
         <service

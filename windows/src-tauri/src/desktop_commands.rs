@@ -486,3 +486,38 @@ pub fn set_default_video_player(
         icon_data_url: crate::exe_icon::icon_data_url_for_system_default(),
     })
 }
+
+/// 選可寫目錄並寫入文字檔（串流收藏導出）
+#[tauri::command]
+#[specta::specta]
+pub async fn export_text_to_picked_folder(
+    app: AppHandle,
+    file_name: String,
+    content: String,
+) -> CommandResult<Option<String>> {
+    let name = file_name.trim();
+    if name.is_empty() {
+        return Err(CommandError::from(
+            "檔名不可為空",
+            anyhow::anyhow!("file_name empty"),
+        ));
+    }
+    let Some(folder) = pick_folder_path(&app).await? else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(&folder).join(name);
+    std::fs::write(&path, content.as_bytes())
+        .map_err(|e| CommandError::from("寫入檔案失敗", e))?;
+    Ok(Some(path.to_string_lossy().into_owned()))
+}
+
+/// 選取 JSON／文字檔並讀取內容（串流收藏導入）
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_and_read_json_text(app: AppHandle) -> CommandResult<Option<String>> {
+    let Some(path) = pick_file_path(&app, Some(vec![("JSON", &["json"])])).await? else {
+        return Ok(None);
+    };
+    let text = std::fs::read_to_string(&path).map_err(|e| CommandError::from("讀取檔案失敗", e))?;
+    Ok(Some(text))
+}

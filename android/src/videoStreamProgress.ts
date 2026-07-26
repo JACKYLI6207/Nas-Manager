@@ -114,7 +114,13 @@ export async function syncVideoStreamProgressFromNative(job: RemoteStreamJob): P
   }
 }
 
+/** 限制並行，避免一次對大量項目打原生橋接造成 UI 卡頓 */
+const SYNC_PARALLEL = 4
+
 export async function syncVideoStreamProgressList(jobs: RemoteStreamJob[]): Promise<void> {
   if (jobs.length === 0) return
-  await Promise.all(jobs.map((j) => syncVideoStreamProgressFromNative(j)))
+  for (let i = 0; i < jobs.length; i += SYNC_PARALLEL) {
+    const batch = jobs.slice(i, i + SYNC_PARALLEL)
+    await Promise.all(batch.map((j) => syncVideoStreamProgressFromNative(j)))
+  }
 }

@@ -18,10 +18,12 @@ import {
   comicStreamPageSrcMap,
   comicStreamReadSession,
   comicStreamSession,
+  consumeComicReturnSubTab,
   getFullComicStreamQueue,
   setCurrentComicStreamJob,
   type RemoteComicStreamJob,
 } from '../comicStreamStore'
+import { comicReadSubTab } from '../comicReadUi'
 import {
   getComicStreamRecord,
   markComicStreamOpened,
@@ -74,6 +76,14 @@ import {
   setScrollIntent,
   waitForPageImageReady,
 } from '../localReaderViewport'
+import {
+  clearPagePlaceholderState,
+  createPageHeightStabilizer,
+  createPagePlaceholderState,
+  markPageDecoded,
+  pageSlotMinHeightStyle,
+  type PageHeightStabilizer,
+} from '../readerPageLayout'
 import MobileReaderProgressBar from './MobileReaderProgressBar.vue'
 import ReaderAspectRatioMenu from './ReaderAspectRatioMenu.vue'
 import '../readerShared.css'
@@ -94,6 +104,10 @@ const { scrollClass: aspectScrollClass } = useReaderAspectRatio()
 const s = comicStreamReadSession
 const { readerPages, readerTitle, readingActive, status, openingBusy } = toRefs(s)
 const estimatedPageHeight = ref(0)
+/** 每頁鎖定 placeholder；decode 後才移除 minHeight */
+const placeholderState = createPagePlaceholderState()
+const decodedTick = ref(0)
+let heightStabilizer: PageHeightStabilizer | undefined
 const pageSrcMap = comicStreamPageSrcMap
 const failedIndices = comicStreamFailedIndices
 const scrollContainerRef = ref<HTMLElement | null>(null)
@@ -395,6 +409,7 @@ function setupObserver() {
   observer?.disconnect()
   const root = scrollContainerRef.value
   if (!root) return
+  ensureHeightStabilizer().reset()
   observer = new IntersectionObserver(
     (entries) => {
       if (!canObserverEnqueuePages()) return
@@ -413,6 +428,7 @@ function setPageRef(index: number, el: Element | { $el?: unknown } | null) {
     el instanceof HTMLElement ? el : (el as { $el?: unknown } | null)?.$el
   if (!(node instanceof HTMLElement)) return
   observer?.observe(node)
+  ensureHeightStabilizer().observe(node)
 }
 
 function enqueueNeighborsInRadius(center: number, radius: number) {
@@ -478,15 +494,37 @@ async function loadPage(index: number) {
 }
 
 function pendingPageStyle(index: number): Record<string, string> | undefined {
-  if (pageSrcMap.value.has(index) || failedIndices.value.has(index)) return undefined
-  const h = estimatedPageHeight.value
-  const minH = h > 0 ? h : Math.max(320, Math.floor(window.innerHeight * 0.72))
-  return { minHeight: `${minH}px` }
+  return pageSlotMinHeightStyle(placeholderState, index, {
+    hasFailed: failedIndices.value.has(index),
+    estimatedPageHeight: estimatedPageHeight.value,
+    decodedTick: decodedTick.value,
+  })
+}
+
+function ensureHeightStabilizer(): PageHeightStabilizer {
+  if (heightStabilizer) return heightStabilizer
+  heightStabilizer = createPageHeightStabilizer({
+    getRoot: () => scrollContainerRef.value,
+    shouldCompensate: () =>
+      readingActive.value &&
+      !isRestoringMode() &&
+      !hasActiveScrollIntent() &&
+      restoreScrollSuppress === 0,
+    onCompensateStart: () => {
+      restoreScrollSuppress += 1
+    },
+    onCompensateEnd: () => {
+      restoreScrollSuppress = Math.max(0, restoreScrollSuppress - 1)
+    },
+  })
+  return heightStabilizer
 }
 
 function onPageImageLoad(index: number) {
   if (!readingActive.value || !activeJob.value) return
 
+  markPageDecoded(placeholderState, index)
+  decodedTick.value += 1
   notifyPageImageReady(index)
   notePageHeight(index)
 
@@ -532,6 +570,10 @@ async function openJob(job: RemoteComicStreamJob) {
     readerSessionId += 1
     resetLocalReaderViewportState()
     estimatedPageHeight.value = 0
+    clearPagePlaceholderState(placeholderState)
+    decodedTick.value = 0
+    heightStabilizer?.disconnect()
+    heightStabilizer = undefined
     clearPostSeekPrefetchTimer()
     clearSeekSafetyTimer()
     stopRestoreSafetyTimer()
@@ -569,6 +611,11 @@ async function openJob(job: RemoteComicStreamJob) {
 function closeReading() {
   persistScrollPosition()
   resetLocalReaderViewportState()
+  estimatedPageHeight.value = 0
+  clearPagePlaceholderState(placeholderState)
+  decodedTick.value = 0
+  heightStabilizer?.disconnect()
+  heightStabilizer = undefined
   clearPostSeekPrefetchTimer()
   clearSeekSafetyTimer()
   stopRestoreSafetyTimer()
@@ -584,6 +631,8 @@ function closeReading() {
   unregisterReaderScrollControl()
   clearReaderImageLoadProgress()
   exitFullscreen()
+  const back = consumeComicReturnSubTab()
+  if (back) comicReadSubTab.value = back
 }
 
 function goToAdjacentSource(delta: number) {

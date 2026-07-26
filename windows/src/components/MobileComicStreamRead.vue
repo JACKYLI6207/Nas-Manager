@@ -17,10 +17,12 @@ import {
   comicStreamPageSrcMap,
   comicStreamReadSession,
   comicStreamSession,
+  consumeComicReturnSubTab,
   getFullComicStreamQueue,
   setCurrentComicStreamJob,
   type RemoteComicStreamJob,
 } from '../comicStreamStore'
+import { comicReadSubTab } from '../comicReadUi'
 import {
   getComicStreamRecord,
   markComicStreamOpened,
@@ -583,6 +585,8 @@ function closeReading() {
   unregisterReaderScrollControl()
   clearReaderImageLoadProgress()
   exitFullscreen()
+  const back = consumeComicReturnSubTab()
+  if (back) comicReadSubTab.value = back
 }
 
 function goToAdjacentSource(delta: number) {

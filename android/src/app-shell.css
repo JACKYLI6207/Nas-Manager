@@ -5,8 +5,10 @@
   flex-direction: column;
   width: 100%;
   max-width: 100vw;
+  /* 分屏／摺疊：優先動態視口，避免 100vh 卡死導致無法上下調整 */
+  height: 100%;
   height: 100dvh;
-  height: 100vh;
+  max-height: 100dvh;
   background: #121212;
   color: #eee;
   font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;

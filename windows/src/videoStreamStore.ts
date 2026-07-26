@@ -14,6 +14,8 @@ export type RemoteStreamJob = {
   pcName?: string
 }
 
+export type VideoReturnSubTab = 'home' | 'current' | 'favorites' | 'log'
+
 export const videoStreamSession = reactive({
   /** 待播放佇列（不含 currentJob） */
   jobs: [] as RemoteStreamJob[],
@@ -22,6 +24,10 @@ export const videoStreamSession = reactive({
   currentJob: null as RemoteStreamJob | null,
   navigateSeq: 0,
   playbackLocked: false,
+  /** 每次換佇列／點播遞增；用於忽略過期的 playStreamJob 收尾，避免播錯 */
+  playGeneration: 0,
+  /** 播放結束後要回到的子分頁（從串流收藏點播時為 favorites） */
+  returnSubTab: null as VideoReturnSubTab | null,
 })
 
 export function streamLog(line: string) {
@@ -40,6 +46,8 @@ export function getFullStreamQueue(): RemoteStreamJob[] {
 
 export function queueRemoteStreamPlay(jobs: RemoteStreamJob[]) {
   clearStreamLog()
+  videoStreamSession.playGeneration += 1
+  videoStreamSession.returnSubTab = null
   videoStreamSession.jobs = [...jobs]
   videoStreamSession.active = jobs.length > 0
   videoStreamSession.currentJob = null
@@ -110,11 +118,15 @@ export function removeFromCurrentQueue(job: RemoteStreamJob) {
 /**
  * 從列表點選：只更新 current，不重排 jobs 順序。
  * sourceJobs 有值時整份替換為收藏列表順序。
+ * fromFavorites：結束播放後回到「串流收藏」。
  */
 export function activateStreamQueueJob(
   target: RemoteStreamJob,
   sourceJobs?: RemoteStreamJob[],
+  opts?: { fromFavorites?: boolean },
 ) {
+  videoStreamSession.playGeneration += 1
+  videoStreamSession.returnSubTab = opts?.fromFavorites ? 'favorites' : null
   if (sourceJobs != null) {
     videoStreamSession.jobs = sourceJobs.map((j) => ({ ...j }))
   } else {
@@ -128,6 +140,12 @@ export function activateStreamQueueJob(
   streamLog(`切換播放：${target.title}`)
   void syncNativeStreamPlaylist()
   requestNavigateToVideoTab()
+}
+
+export function consumeVideoReturnSubTab(): VideoReturnSubTab | null {
+  const tab = videoStreamSession.returnSubTab
+  videoStreamSession.returnSubTab = null
+  return tab
 }
 
 export async function syncNativeStreamPlaylist() {

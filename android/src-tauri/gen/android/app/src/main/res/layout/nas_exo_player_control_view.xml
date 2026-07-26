@@ -60,6 +60,11 @@
           style="@style/ExoStyledControls.Button.Bottom.RepeatToggle" />
 
       <ImageButton
+          android:id="@+id/nas_exo_orientation"
+          style="@style/ExoStyledControls.Button.Bottom.CC"
+          android:contentDescription="直版／橫向" />
+
+      <ImageButton
           android:id="@+id/nas_exo_playlist"
           style="@style/ExoStyledControls.Button.Bottom.CC"
           android:contentDescription="播放列表" />

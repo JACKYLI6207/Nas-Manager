@@ -320,3 +320,68 @@ pub async fn play_remote_pc_video(
         ))
     }
 }
+
+/// 選可寫目錄並寫入文字檔（串流收藏導出）
+#[tauri::command]
+#[specta::specta]
+pub async fn export_text_to_picked_folder(
+    app: AppHandle,
+    file_name: String,
+    content: String,
+) -> CommandResult<Option<String>> {
+    let name = file_name.trim();
+    if name.is_empty() {
+        return Err(CommandError::from(
+            "檔名不可為空",
+            anyhow::anyhow!("file_name empty"),
+        ));
+    }
+    let Some(tree) = pick_writable_folder_path(&app).await? else {
+        return Ok(None);
+    };
+    #[cfg(target_os = "android")]
+    {
+        let uri = folder_picker(&app)?.write_snapshot_to_tree(&tree, name, &content)?;
+        return Ok(Some(uri));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let path = std::path::PathBuf::from(&tree).join(name);
+        std::fs::write(&path, content.as_bytes())
+            .map_err(|e| CommandError::from("寫入檔案失敗", e))?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    }
+}
+
+/// 選取 JSON／文字檔並讀取內容（串流收藏導入）
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_and_read_json_text(app: AppHandle) -> CommandResult<Option<String>> {
+    #[cfg(target_os = "android")]
+    {
+        let picker = folder_picker(&app)?;
+        let Some(uri) = picker.pick_open_archive()? else {
+            return Ok(None);
+        };
+        return Ok(Some(picker.read_text(&uri)?));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let (tx, rx) = oneshot::channel();
+        app.dialog()
+            .file()
+            .add_filter("JSON", &["json"])
+            .pick_file(move |path| {
+                let _ = tx.send(path);
+            });
+        let picked = rx
+            .await
+            .map_err(|_| CommandError::from("選擇檔案失敗", anyhow::anyhow!("對話框已關閉")))?;
+        let Some(path) = picked else {
+            return Ok(None);
+        };
+        let text = std::fs::read_to_string(path.to_path_buf())
+            .map_err(|e| CommandError::from("讀取檔案失敗", e))?;
+        Ok(Some(text))
+    }
+}

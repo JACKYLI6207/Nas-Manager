@@ -69,6 +69,18 @@ pub struct RemotePcDirEntry {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub struct RemotePcShareMountInfo {
+    pub label: String,
+    #[serde(default)]
+    pub display: String,
+    #[serde(default)]
+    pub volume_guid: String,
+    #[serde(default)]
+    pub legacy_labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct RemotePcBrowseResult {
     pub path: String,
     #[serde(default)]
@@ -76,6 +88,8 @@ pub struct RemotePcBrowseResult {
     pub entries: Vec<RemotePcDirEntry>,
     #[serde(default)]
     pub remote_api: Option<u32>,
+    #[serde(default)]
+    pub share_mounts: Vec<RemotePcShareMountInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
@@ -98,6 +112,8 @@ struct BrowseResponse {
     #[serde(default)]
     path_display: Option<String>,
     entries: Vec<RemotePcDirEntry>,
+    #[serde(default)]
+    share_mounts: Vec<RemotePcShareMountInfo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1153,6 +1169,7 @@ pub async fn list_remote_pc_directory(
                     path_display: body.path_display,
                     entries: body.entries,
                     remote_api,
+                    share_mounts: body.share_mounts,
                 });
             }
             Ok(resp) => {

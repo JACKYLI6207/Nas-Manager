@@ -219,11 +219,29 @@ export type RemotePcDirEntry = {
   diskTotalBytes?: number | null
 }
 
+export type RemotePcShareMountInfo = {
+  label: string
+  display?: string
+  volumeGuid?: string
+  legacyLabels?: string[]
+}
+
 export type RemotePcBrowseResult = {
   path: string
   pathDisplay?: string | null
   entries: RemotePcDirEntry[]
   remoteApi?: number | null
+  shareMounts?: RemotePcShareMountInfo[]
+}
+
+/** 選可寫目錄並寫入文字檔；取消回傳 null */
+export function exportTextToPickedFolder(fileName: string, content: string) {
+  return invoke<string | null>('export_text_to_picked_folder', { fileName, content })
+}
+
+/** 選 JSON／文字檔並讀取；取消回傳 null */
+export function pickAndReadJsonText() {
+  return invoke<string | null>('pick_and_read_json_text')
 }
 
 export type RemotePcScanResult = {

@@ -85,6 +85,14 @@ import {
   setScrollIntent,
   waitForPageImageReady,
 } from '../localReaderViewport'
+import {
+  clearPagePlaceholderState,
+  createPageHeightStabilizer,
+  createPagePlaceholderState,
+  markPageDecoded,
+  pageSlotMinHeightStyle,
+  type PageHeightStabilizer,
+} from '../readerPageLayout'
 import MobileReaderProgressBar from './MobileReaderProgressBar.vue'
 import ReaderAspectRatioMenu from './ReaderAspectRatioMenu.vue'
 import { comicReadSubTab } from '../comicReadUi'
@@ -125,6 +133,10 @@ const openingBusy = ref(false)
 /** 還原剛結束時短暫禁止寫入，避免錯誤位置覆蓋書籤 */
 let restoreSaveBlocked = false
 const estimatedPageHeight = ref(0)
+/** 每頁鎖定 placeholder；decode 後才移除 minHeight */
+const placeholderState = createPagePlaceholderState()
+const decodedTick = ref(0)
+let heightStabilizer: PageHeightStabilizer | undefined
 /** 等待系統 SAF 選擇器時不可顯示全螢幕遮罩，否則會擋住選檔視窗 */
 const awaitingSystemPicker = ref(false)
 const openProgressLabel = ref('')
@@ -391,10 +403,30 @@ function notePageHeight(index: number) {
 }
 
 function pendingPageStyle(index: number): Record<string, string> | undefined {
-  if (pageSrcMap.value.has(index) || failedIndices.value.has(index)) return undefined
-  const h = estimatedPageHeight.value
-  const minH = h > 0 ? h : Math.max(320, Math.floor(window.innerHeight * 0.72))
-  return { minHeight: `${minH}px` }
+  return pageSlotMinHeightStyle(placeholderState, index, {
+    hasFailed: failedIndices.value.has(index),
+    estimatedPageHeight: estimatedPageHeight.value,
+    decodedTick: decodedTick.value,
+  })
+}
+
+function ensureHeightStabilizer(): PageHeightStabilizer {
+  if (heightStabilizer) return heightStabilizer
+  heightStabilizer = createPageHeightStabilizer({
+    getRoot: () => scrollContainerRef.value,
+    shouldCompensate: () =>
+      readingActive.value &&
+      !isRestoringMode() &&
+      !hasActiveScrollIntent() &&
+      restoreScrollSuppress === 0,
+    onCompensateStart: () => {
+      restoreScrollSuppress += 1
+    },
+    onCompensateEnd: () => {
+      restoreScrollSuppress = Math.max(0, restoreScrollSuppress - 1)
+    },
+  })
+  return heightStabilizer
 }
 
 function finishPositionRestore() {
@@ -437,6 +469,10 @@ function clearReaderContent() {
   restoreSaveBlocked = false
   resetLocalReaderViewportState()
   estimatedPageHeight.value = 0
+  clearPagePlaceholderState(placeholderState)
+  decodedTick.value = 0
+  heightStabilizer?.disconnect()
+  heightStabilizer = undefined
   revokeAllBlobUrls()
   void closeLocalReaderZipSession()
   loadQueue = []
@@ -673,6 +709,7 @@ function setupObserver() {
   observer?.disconnect()
   const root = scrollContainerRef.value
   if (!root) return
+  ensureHeightStabilizer().reset()
   observer = new IntersectionObserver(
     (entries) => {
       if (!canObserverEnqueuePages()) return
@@ -691,6 +728,7 @@ function setPageRef(index: number, el: Element | { $el?: unknown } | null) {
     el instanceof HTMLElement ? el : (el as { $el?: unknown } | null)?.$el
   if (!(node instanceof HTMLElement)) return
   observer?.observe(node)
+  ensureHeightStabilizer().observe(node)
 }
 
 function enqueueNeighborsInRadius(center: number, radius: number) {
@@ -783,6 +821,8 @@ function preloadPagesForRestore(pageIndex: number) {
 function onPageImageLoad(index: number) {
   if (!readingActive.value || !currentSourcePath.value) return
 
+  markPageDecoded(placeholderState, index)
+  decodedTick.value += 1
   notifyPageImageReady(index)
   notePageHeight(index)
 

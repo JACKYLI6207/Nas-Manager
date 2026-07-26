@@ -79,6 +79,8 @@ pub fn run() {
             plan_remote_pc_upload,
             upload_remote_pc_files,
             remote_pc_file_op,
+            export_text_to_picked_folder,
+            pick_and_read_json_text,
         ])
         .events(tauri_specta::collect_events![LogEvent, RemoteTransferProgressEvent]);
 

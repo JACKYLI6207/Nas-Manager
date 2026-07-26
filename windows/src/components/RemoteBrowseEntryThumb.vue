@@ -2,11 +2,18 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { fetchRemoteComicPageImage, fetchRemoteComicPages, MIN_COMIC_REMOTE_API } from '../api'
 import {
+  resolveSiblingCoverUrl,
+  VIDEO_LIST_MARKER,
+} from '../remoteBrowseCover'
+import {
   buildRemoteStreamUrl,
   entryFallbackIcon,
   getCachedThumb,
   isComicZipFileName,
   isImageFile,
+  isVideoFileName,
+  removeCachedThumb,
+  scheduleThumbWork,
   setCachedThumb,
 } from '../remoteBrowseMedia'
 
@@ -20,42 +27,46 @@ const props = defineProps<{
 }>()
 
 const thumbSrc = ref<string | null>(null)
+const loadState = ref<'idle' | 'loading' | 'ready' | 'fail'>('idle')
 const rootRef = ref<HTMLElement | null>(null)
 let observer: IntersectionObserver | undefined
 let ownedBlobUrl: string | null = null
+let requestSeq = 0
+let retryCount = 0
 
 function cacheKey(): string {
   return `${props.host}:${props.port}:${props.relPath}`
-}
-
-function showFallback(): boolean {
-  return !thumbSrc.value
 }
 
 function fallbackEmoji(): string {
   return entryFallbackIcon(props.name, props.isDir)
 }
 
-async function loadThumb() {
-  if (props.isDir) return
+async function resolveThumbUrl(): Promise<string | null> {
+  if (props.isDir) return null
+
   const key = cacheKey()
   const cached = getCachedThumb(key)
-  if (cached) {
-    thumbSrc.value = cached
-    return
-  }
+  if (cached) return cached
 
   if (isImageFile(props.name)) {
-    const url = buildRemoteStreamUrl(props.host, props.port, props.relPath)
-    setCachedThumb(key, url)
-    thumbSrc.value = url
-    return
+    return buildRemoteStreamUrl(props.host, props.port, props.relPath)
+  }
+
+  if (isVideoFileName(props.name)) {
+    // 穩定 URL（不加 Date.now），讓瀏覽器可重用連線／快取，避免進目錄時打爆 PC
+    return resolveSiblingCoverUrl(
+      props.host,
+      props.port,
+      props.relPath,
+      VIDEO_LIST_MARKER,
+    )
   }
 
   if (isComicZipFileName(props.name) && (props.remoteApi ?? 0) >= MIN_COMIC_REMOTE_API) {
     const pages = await fetchRemoteComicPages(props.host, props.port, props.relPath)
     const first = pages.pages[0]
-    if (!first) return
+    if (!first) return null
     const bytes = await fetchRemoteComicPageImage(
       props.host,
       props.port,
@@ -63,26 +74,99 @@ async function loadThumb() {
       first.entry,
     )
     const blob = new Blob([new Uint8Array(bytes)], { type: 'image/jpeg' })
+    if (ownedBlobUrl) {
+      URL.revokeObjectURL(ownedBlobUrl)
+    }
     ownedBlobUrl = URL.createObjectURL(blob)
-    setCachedThumb(key, ownedBlobUrl)
-    thumbSrc.value = ownedBlobUrl
+    return ownedBlobUrl
+  }
+
+  return null
+}
+
+async function loadThumb() {
+  if (props.isDir) return
+  const seq = ++requestSeq
+  loadState.value = 'loading'
+  try {
+    const url = await scheduleThumbWork(() => resolveThumbUrl())
+    if (seq !== requestSeq) return
+    if (url) {
+      thumbSrc.value = url
+      loadState.value = 'ready'
+    } else if (retryCount < 2) {
+      retryCount += 1
+      window.setTimeout(() => {
+        if (seq === requestSeq) void loadThumb()
+      }, 280 * retryCount)
+    } else {
+      thumbSrc.value = null
+      loadState.value = 'fail'
+    }
+  } catch {
+    if (seq !== requestSeq) return
+    if (retryCount < 2) {
+      retryCount += 1
+      window.setTimeout(() => {
+        if (seq === requestSeq) void loadThumb()
+      }, 280 * retryCount)
+    } else {
+      thumbSrc.value = null
+      loadState.value = 'fail'
+    }
+  }
+}
+
+function onImgLoad() {
+  const url = thumbSrc.value
+  if (!url) return
+  setCachedThumb(cacheKey(), url)
+  retryCount = 0
+  loadState.value = 'ready'
+}
+
+function onImgError() {
+  const key = cacheKey()
+  removeCachedThumb(key)
+  const failed = thumbSrc.value
+  thumbSrc.value = null
+  if (failed?.startsWith('blob:') && failed === ownedBlobUrl) {
+    try {
+      URL.revokeObjectURL(failed)
+    } catch {
+      /* ignore */
+    }
+    ownedBlobUrl = null
+  }
+  if (retryCount < 2) {
+    retryCount += 1
+    window.setTimeout(() => {
+      void loadThumb()
+    }, 320 * retryCount)
+  } else {
+    loadState.value = 'fail'
   }
 }
 
 function setupObserver() {
   observer?.disconnect()
-  if (props.isDir) return
+  if (props.isDir) {
+    loadState.value = 'idle'
+    thumbSrc.value = null
+    return
+  }
+  retryCount = 0
+  loadState.value = 'idle'
+  thumbSrc.value = null
   observer = new IntersectionObserver(
     (entries) => {
       if (entries.some((e) => e.isIntersecting)) {
-        void loadThumb().catch(() => {
-          /* fallback emoji */
-        })
+        void loadThumb()
         observer?.disconnect()
         observer = undefined
       }
     },
-    { rootMargin: '160px' },
+    { rootMargin: '200px' },
   )
   if (rootRef.value) {
     observer.observe(rootRef.value)
@@ -92,11 +176,11 @@ function setupObserver() {
 watch(
   () => [props.host, props.port, props.relPath, props.name] as const,
   () => {
+    requestSeq += 1
     if (ownedBlobUrl) {
       URL.revokeObjectURL(ownedBlobUrl)
       ownedBlobUrl = null
     }
-    thumbSrc.value = null
     setupObserver()
   },
 )
@@ -107,6 +191,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   observer?.disconnect()
+  requestSeq += 1
   if (ownedBlobUrl) {
     URL.revokeObjectURL(ownedBlobUrl)
     ownedBlobUrl = null
@@ -121,10 +206,14 @@ onBeforeUnmount(() => {
       :src="thumbSrc"
       alt=""
       class="remote-browse-thumb-img"
-      loading="lazy"
       decoding="async"
+      @load="onImgLoad"
+      @error="onImgError"
     />
-    <span v-else-if="showFallback()" class="remote-browse-thumb-fallback">{{ fallbackEmoji() }}</span>
+    <span v-else-if="loadState === 'loading'" class="remote-browse-thumb-loading" aria-hidden="true" />
+    <span v-else-if="loadState === 'fail' || isDir" class="remote-browse-thumb-fallback">{{
+      fallbackEmoji()
+    }}</span>
   </div>
 </template>
 
@@ -156,5 +245,20 @@ onBeforeUnmount(() => {
   font-size: clamp(22px, 40%, 48px);
   line-height: 1;
   user-select: none;
+}
+
+.remote-browse-thumb-loading {
+  width: 28%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.15);
+  border-top-color: rgba(110, 181, 255, 0.75);
+  animation: remote-browse-thumb-spin 0.8s linear infinite;
+}
+
+@keyframes remote-browse-thumb-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 </style>

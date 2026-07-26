@@ -83,6 +83,10 @@ pub struct RemoteManagementStatus {
 struct ShareMountHealth {
     label: String,
     display: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    volume_guid: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    legacy_labels: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -113,6 +117,32 @@ impl HttpState {
         if let Some(m) = self.mounts.iter().find(|m| m.label == head) {
             return Some(m);
         }
+        // 舊收藏／舊客戶端：以磁碟代號衍生的 legacy label
+        if let Some(m) = self
+            .mounts
+            .iter()
+            .find(|m| m.legacy_labels.iter().any(|l| l == head || l.eq_ignore_ascii_case(head)))
+        {
+            return Some(m);
+        }
+        // Volume GUID（含／不含大括號、或 vol_<guid> 前綴）
+        let head_guid = head
+            .trim()
+            .trim_start_matches("vol_")
+            .trim_matches(|c| c == '{' || c == '}')
+            .to_ascii_lowercase();
+        if !head_guid.is_empty() {
+            if let Some(m) = self.mounts.iter().find(|m| {
+                let g = m
+                    .volume_guid
+                    .trim()
+                    .trim_matches(|c| c == '{' || c == '}')
+                    .to_ascii_lowercase();
+                !g.is_empty() && (g == head_guid || m.label.eq_ignore_ascii_case(head))
+            }) {
+                return Some(m);
+            }
+        }
         // 相容舊版 API 根名稱（分享 / 分享@\ / 資料夾名）
         if head == "分享" || head.eq_ignore_ascii_case("share") {
             return self.mounts.first();
@@ -132,10 +162,14 @@ impl HttpState {
         if rel.is_empty() {
             return String::new();
         }
-        for prefix in [
+        let mut prefixes: Vec<&str> = vec![
             mount.label.as_str(),
             mount.display.trim_end_matches(['\\', '/']),
-        ] {
+        ];
+        for l in &mount.legacy_labels {
+            prefixes.push(l.as_str());
+        }
+        for prefix in prefixes {
             if prefix.is_empty() {
                 continue;
             }
@@ -144,7 +178,7 @@ impl HttpState {
             }
             if let Some(rest) = rel.strip_prefix(prefix) {
                 let rest = rest.trim_start_matches(['/', '\\']);
-                if !rest.is_empty() {
+                if !rest.is_empty() || rel == prefix {
                     return rest.to_string();
                 }
             }
@@ -247,6 +281,9 @@ struct BrowseResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     path_display: Option<String>,
     entries: Vec<RemoteDirEntry>,
+    /// 根目錄時附帶：供客戶端把舊「磁碟代號 label」收藏遷移成 Volume GUID label
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    share_mounts: Vec<ShareMountHealth>,
 }
 
 #[derive(serde::Deserialize)]
@@ -815,13 +852,15 @@ async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> 
         .map(|m| ShareMountHealth {
             label: m.label.clone(),
             display: m.display.clone(),
+            volume_guid: m.volume_guid.clone(),
+            legacy_labels: m.legacy_labels.clone(),
         })
         .collect();
     Json(HealthResponse {
         ok: true,
         app: "Nas Manager",
         version: env!("CARGO_PKG_VERSION"),
-        remote_api: 11,
+        remote_api: 12,
         share_mounts,
     })
 }
@@ -1114,11 +1153,22 @@ async fn serve_browse(
             })
             .collect();
         entries.sort_by(|a, b| compare_entry_name(&a.name, &b.name));
+        let share_mounts = state
+            .mounts
+            .iter()
+            .map(|m| ShareMountHealth {
+                label: m.label.clone(),
+                display: m.display.clone(),
+                volume_guid: m.volume_guid.clone(),
+                legacy_labels: m.legacy_labels.clone(),
+            })
+            .collect();
         return Ok(Json(BrowseResponse {
             ok: true,
             path: String::new(),
             path_display: None,
             entries,
+            share_mounts,
         }));
     }
     match state.resolve_browse_dir(rel_path) {
@@ -1137,6 +1187,7 @@ async fn serve_browse(
                 path: api_path,
                 path_display: Some(path_display),
                 entries,
+                share_mounts: Vec::new(),
             }))
         }
         Err(err) => Err((StatusCode::BAD_REQUEST, err.to_string())),
@@ -2483,16 +2534,22 @@ mod path_tests {
                     label: "H--".to_string(),
                     display: "H:\\".to_string(),
                     root: h.clone(),
+                    volume_guid: String::new(),
+                    legacy_labels: vec![],
                 },
                 ShareMount {
                     label: "I--".to_string(),
                     display: "I:\\".to_string(),
                     root: i.clone(),
+                    volume_guid: String::new(),
+                    legacy_labels: vec![],
                 },
                 ShareMount {
                     label: "E--漫畫".to_string(),
                     display: "E:\\漫畫".to_string(),
                     root: e.clone(),
+                    volume_guid: String::new(),
+                    legacy_labels: vec![],
                 },
             ],
             single_flat: false,
@@ -2518,6 +2575,8 @@ mod path_tests {
             label: "E--漫畫".to_string(),
             display: "E:\\漫畫".to_string(),
             root: PathBuf::from(r"E:\漫畫"),
+            volume_guid: String::new(),
+            legacy_labels: vec![],
         };
         assert_eq!(
             HttpState::strip_mount_prefix(&mount, "E--漫畫/IMG_test.jpg"),

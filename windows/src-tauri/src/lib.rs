@@ -84,6 +84,8 @@ pub fn run() {
             list_video_player_options,
             pick_external_video_player_exe,
             set_default_video_player,
+            export_text_to_picked_folder,
+            pick_and_read_json_text,
         ])
         .events(tauri_specta::collect_events![
             LogEvent,

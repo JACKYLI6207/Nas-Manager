@@ -12,16 +12,13 @@ import {
 import { copyTextFromTextarea } from '../copyText'
 import { formatInvokeError } from '../invokeError'
 import {
-  addFavoriteStreamPlaylist,
   jobKey,
-  loadFavoriteStreamPlaylists,
-  removeFavoriteStreamPlaylist,
-  removeFavoriteStreamPlaylistItem,
-  renameFavoriteStreamPlaylist,
-  type FavoriteStreamPlaylist,
+  videoFavoriteAdapter,
+  videoFavoritePlaylistsRevision,
 } from '../streamPlaylistStorage'
-import { defaultStreamFavoriteName } from '../streamFavoriteName'
 import StreamPlaylistList from './StreamPlaylistList.vue'
+import StreamFavoritesPanel from './StreamFavoritesPanel.vue'
+import StreamFavoriteAddDialog from './StreamFavoriteAddDialog.vue'
 import {
   formatVideoStreamProgressLabel,
   hasVideoStreamRecord,
@@ -34,10 +31,10 @@ import {
   acquireStreamPlaybackLock,
   activateStreamQueueJob,
   clearCurrentStreamQueue,
+  consumeVideoReturnSubTab,
   finishStreamSession,
   getFullStreamQueue,
   releaseStreamPlaybackLock,
-  requestNavigateToVideoTab,
   removeFromCurrentQueue,
   setCurrentStreamJob,
   shiftNextStreamJob,
@@ -81,10 +78,14 @@ const videoSubTabs: { key: VideoSubTab; label: string }[] = [
 ]
 
 const videoSubTab = ref<VideoSubTab>('home')
-const favoritePlaylists = ref<FavoriteStreamPlaylist[]>([])
-const expandedFavoriteIds = ref<Set<string>>(new Set())
 /** 觸發串流列表進度 UI 更新 */
 const videoProgressTick = ref(0)
+const addDialogOpen = ref(false)
+const addDialogJobs = ref<RemoteStreamJob[]>([])
+const favoritePlaylistsCount = computed(() => {
+  void videoFavoritePlaylistsRevision.value
+  return videoFavoriteAdapter.loadState().playlists.length
+})
 
 function videoProgressLabel(job: RemoteStreamJob): string | null {
   void videoProgressTick.value
@@ -101,41 +102,28 @@ function videoProgressRatioForJob(job: RemoteStreamJob): number | null {
   return videoStreamProgressRatio(job)
 }
 
-async function refreshVideoStreamProgress() {
-  const jobs: RemoteStreamJob[] = [...fullStreamQueue.value]
-  for (const pl of favoritePlaylists.value) {
-    jobs.push(...pl.jobs)
+/** 僅同步「串流列表」佇列進度（勿掃全部收藏，否則分頁切換會卡） */
+async function refreshQueueStreamProgress() {
+  const jobs = fullStreamQueue.value
+  if (jobs.length > 0) {
+    await syncVideoStreamProgressList(jobs)
   }
-  await syncVideoStreamProgressList(jobs)
   videoProgressTick.value += 1
 }
 
-function reloadFavoritePlaylists() {
-  favoritePlaylists.value = loadFavoriteStreamPlaylists()
-}
+const favoritesEverOpened = ref(false)
 
 function setVideoSubTab(tab: VideoSubTab) {
   videoSubTab.value = tab
   if (tab === 'favorites') {
-    reloadFavoritePlaylists()
+    favoritesEverOpened.value = true
+    // 收藏進度已在 localStorage；只刷新 UI，避免對每部收藏做原生進度查詢
+    videoProgressTick.value += 1
+    return
   }
-  if (tab === 'current' || tab === 'favorites') {
-    void refreshVideoStreamProgress()
+  if (tab === 'current') {
+    void refreshQueueStreamProgress()
   }
-}
-
-function isFavoriteExpanded(id: string): boolean {
-  return expandedFavoriteIds.value.has(id)
-}
-
-function toggleFavoriteExpanded(id: string) {
-  const next = new Set(expandedFavoriteIds.value)
-  if (next.has(id)) {
-    next.delete(id)
-  } else {
-    next.add(id)
-  }
-  expandedFavoriteIds.value = next
 }
 const canResumeStream = computed(
   () =>
@@ -329,10 +317,15 @@ async function openLocalVideo() {
 
 async function playStreamJob(job: RemoteStreamJob) {
   if (!acquireStreamPlaybackLock()) return
+  const playGen = videoStreamSession.playGeneration
   status.value = `正在連線：${job.title}`
   streamLog(`開始播放：${job.relPath}`)
   streamLog(`  原記錄 PC ${job.host}:${job.port}${job.pcName ? `（${job.pcName}）` : ''}`)
   const resolved = await resolveStreamJobHost(job)
+  if (playGen !== videoStreamSession.playGeneration) {
+    releaseStreamPlaybackLock()
+    return
+  }
   if (resolved.host !== job.host) {
     streamLog(`  已改連目前可達 IP：${resolved.host}:${resolved.port}`)
     // 同步更新佇列內同鍵項目的 host，避免下一集又走失效 IP
@@ -344,6 +337,10 @@ async function playStreamJob(job: RemoteStreamJob) {
   setCurrentStreamJob(resolved)
   markVideoStreamOpened(resolved)
   await syncNativeStreamPlaylist()
+  if (playGen !== videoStreamSession.playGeneration) {
+    releaseStreamPlaybackLock()
+    return
+  }
   status.value = `正在串流：${resolved.title}`
   streamLog(`  PC ${resolved.host}:${resolved.port}`)
   let pausedInBackground = false
@@ -355,6 +352,9 @@ async function playStreamJob(job: RemoteStreamJob) {
       resolved.relPath,
       resolved.title,
     )
+    if (playGen !== videoStreamSession.playGeneration) {
+      return
+    }
     pausedInBackground = result.background === true
     playbackErr = await handlePlayVideoResult(result)
     if (playbackErr) {
@@ -375,6 +375,9 @@ async function playStreamJob(job: RemoteStreamJob) {
           : `已播放 ${resolved.title}`
     }
   } catch (e) {
+    if (playGen !== videoStreamSession.playGeneration) {
+      return
+    }
     const err = formatInvokeError(e)
     streamLog(`失敗：${resolved.title}`)
     streamLog(`  ${err}`)
@@ -382,6 +385,9 @@ async function playStreamJob(job: RemoteStreamJob) {
     playbackErr = err
   } finally {
     releaseStreamPlaybackLock()
+    if (playGen !== videoStreamSession.playGeneration) {
+      return
+    }
     await syncVideoStreamProgressFromNative(job)
     videoProgressTick.value += 1
     if (!pausedInBackground && !playbackErr && !backgroundSession.value) {
@@ -391,6 +397,8 @@ async function playStreamJob(job: RemoteStreamJob) {
       } else {
         setCurrentStreamJob(null)
         videoStreamSession.active = false
+        const back = consumeVideoReturnSubTab()
+        if (back) videoSubTab.value = back
       }
     }
     if (videoStreamSession.jobs.length === 0 && !videoStreamSession.currentJob) {
@@ -445,39 +453,24 @@ function onStarCurrentPlaylist() {
     status.value = '播放列表為空'
     return
   }
-  const suggested = defaultStreamFavoriteName(jobs, `播放列表 ${jobs.length} 部`)
-  const name = window.prompt('收藏列表名稱（可留空＝資料夾名）', suggested)
-  if (name === null) return
-  const finalName = name.trim() || suggested
-  favoritePlaylists.value = addFavoriteStreamPlaylist(finalName, jobs)
-  streamLog(`已加入串流收藏：${finalName}`)
+  addDialogJobs.value = jobs
+  addDialogOpen.value = true
 }
 
-function onLoadFavorite(pl: FavoriteStreamPlaylist) {
-  if (pl.jobs.length === 0) return
-  videoStreamSession.jobs = pl.jobs.map((j) => ({ ...j }))
+function onAddDialogDone() {
+  streamLog('已更新串流收藏')
+}
+
+function onLoadFavoritePlaylist(jobs: RemoteStreamJob[], name: string) {
+  if (jobs.length === 0) return
+  videoStreamSession.jobs = jobs.map((j) => ({ ...j }))
   videoStreamSession.currentJob = null
   videoStreamSession.active = true
-  streamLog(`載入串流收藏：${pl.name}（${pl.jobs.length} 部）`)
+  streamLog(`載入串流收藏：${name}（${jobs.length} 部）`)
   videoSubTab.value = 'current'
 }
 
-function onRenameFavorite(id: string, currentName: string) {
-  const name = window.prompt('重新命名', currentName)
-  if (name === null) return
-  favoritePlaylists.value = renameFavoriteStreamPlaylist(id, name)
-}
-
-function onRemoveFavorite(id: string) {
-  if (!window.confirm('確定刪除此收藏？')) return
-  favoritePlaylists.value = removeFavoriteStreamPlaylist(id)
-}
-
-function onRemoveFavoriteItem(plId: string, job: RemoteStreamJob) {
-  favoritePlaylists.value = removeFavoriteStreamPlaylistItem(plId, job)
-}
-
-async function onPickFavoriteQueueJob(pl: FavoriteStreamPlaylist, job: RemoteStreamJob) {
+async function onPlayFavoriteItem(job: RemoteStreamJob, sourceJobs: RemoteStreamJob[]) {
   if (videoStreamSession.playbackLocked) {
     try {
       await stopVideoPlayback()
@@ -487,7 +480,7 @@ async function onPickFavoriteQueueJob(pl: FavoriteStreamPlaylist, job: RemoteStr
     releaseStreamPlaybackLock()
     backgroundSession.value = null
   }
-  activateStreamQueueJob(job, pl.jobs)
+  activateStreamQueueJob(job, sourceJobs, { fromFavorites: true })
   await nextTick()
   await processRemoteStreamQueue()
 }
@@ -604,8 +597,9 @@ async function processRemoteStreamQueue() {
   if (videoStreamSession.playbackLocked) return
   let job = videoStreamSession.currentJob
   if (!job) {
-    job = shiftNextStreamJob()
-    if (!job) return
+    const next = shiftNextStreamJob()
+    if (!next) return
+    job = next
     setCurrentStreamJob(job)
   }
   await playStreamJob(job)
@@ -628,20 +622,27 @@ async function copyStreamLog() {
 function onDocumentVisibilityForSession() {
   if (document.visibilityState === 'visible') {
     void refreshBackgroundSession()
-    void refreshVideoStreamProgress()
+    if (videoSubTab.value === 'current') {
+      void refreshQueueStreamProgress()
+    } else {
+      videoProgressTick.value += 1
+    }
   }
 }
 
 onMounted(() => {
   document.addEventListener('visibilitychange', onAppForegroundForPlayback)
   document.addEventListener('visibilitychange', onDocumentVisibilityForSession)
-  reloadFavoritePlaylists()
   void refreshBackgroundSession()
 })
 
 onActivated(() => {
   void refreshBackgroundSession()
-  void refreshVideoStreamProgress()
+  if (videoSubTab.value === 'current') {
+    void refreshQueueStreamProgress()
+  } else {
+    videoProgressTick.value += 1
+  }
   window.setTimeout(() => {
     void refreshBackgroundSession()
   }, 300)
@@ -659,8 +660,24 @@ onActivated(() => {
 watch(
   () => videoStreamSession.navigateSeq,
   () => {
-    videoSubTab.value = 'current'
-    void nextTick(() => processRemoteStreamQueue())
+    // 遠端新佇列：先停掉舊播放器，避免與舊 playStreamJob 競態播錯
+    void (async () => {
+      try {
+        await stopVideoPlayback()
+      } catch {
+        /* ignore */
+      }
+      releaseStreamPlaybackLock()
+      backgroundSession.value = null
+      // 從收藏點播保留 returnSubTab；遠端新佇列則進串流列表
+      if (videoStreamSession.returnSubTab === 'favorites') {
+        videoSubTab.value = 'favorites'
+      } else {
+        videoSubTab.value = 'current'
+      }
+      await nextTick()
+      await processRemoteStreamQueue()
+    })()
   },
 )
 
@@ -720,9 +737,9 @@ onBeforeUnmount(() => {
           class="video-sub-badge"
         >{{ fullQueueCount }}</span>
         <span
-          v-if="tab.key === 'favorites' && favoritePlaylists.length > 0"
+          v-if="tab.key === 'favorites' && favoritePlaylistsCount > 0"
           class="video-sub-badge"
-        >{{ favoritePlaylists.length }}</span>
+        >{{ favoritePlaylistsCount }}</span>
         <span
           v-if="tab.key === 'log' && hasStreamLog"
           class="video-sub-dot"
@@ -820,36 +837,21 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- 串流收藏（UI／操作與漫畫閱讀一致） -->
+    <!-- 串流收藏：首次進入才掛載，之後 v-show 保留狀態，避免來回重掛卡頓 -->
     <div v-show="videoSubTab === 'favorites'" class="video-sub-pane video-sub-pane--favorites">
-      <p class="video-pane-heading video-pane-heading--solo">串流收藏（{{ favoritePlaylists.length }}）</p>
-      <div class="fav-pl-scroll">
-        <p v-if="favoritePlaylists.length === 0" class="stream-pl-empty">
-          尚無收藏；在「串流列表」按「★ 收藏此列表」
-        </p>
-        <div v-for="pl in favoritePlaylists" :key="pl.id" class="fav-pl-block">
-          <div class="fav-pl-head">
-            <button type="button" class="fav-pl-toggle" @click="toggleFavoriteExpanded(pl.id)">
-              {{ isFavoriteExpanded(pl.id) ? '▼' : '▶' }}
-            </button>
-            <button type="button" class="fav-pl-name" @click="onLoadFavorite(pl)">{{ pl.name }}</button>
-            <span class="fav-pl-count">{{ pl.jobs.length }} 部</span>
-            <button type="button" class="fav-pl-mini" @click="onRenameFavorite(pl.id, pl.name)">改名</button>
-            <button type="button" class="fav-pl-mini fav-pl-mini--danger" @click="onRemoveFavorite(pl.id)">刪</button>
-          </div>
-          <StreamPlaylistList
-            v-if="isFavoriteExpanded(pl.id)"
-            fill
-            :jobs="pl.jobs"
-            :progress-for-job="videoProgressLabel"
-            :progress-ratio-for-job="videoProgressRatioForJob"
-            :opened-for-job="videoOpenedMark"
-            show-remove
-            @play="(job) => onPickFavoriteQueueJob(pl, job)"
-            @remove="(job) => onRemoveFavoriteItem(pl.id, job)"
-          />
-        </div>
-      </div>
+      <StreamFavoritesPanel
+        v-if="favoritesEverOpened"
+        :adapter="videoFavoriteAdapter"
+        media="video"
+        :current-key="currentJobKey"
+        :revision="videoFavoritePlaylistsRevision"
+        :progress-for-job="videoProgressLabel"
+        :progress-ratio-for-job="videoProgressRatioForJob"
+        :opened-for-job="videoOpenedMark"
+        empty-hint="尚無收藏；在「串流列表」按「★ 收藏此列表」"
+        @load-playlist="onLoadFavoritePlaylist"
+        @play-item="onPlayFavoriteItem"
+      />
     </div>
 
     <!-- 串流日誌 -->
@@ -874,6 +876,15 @@ onBeforeUnmount(() => {
       </div>
     </div>
     </div>
+
+    <StreamFavoriteAddDialog
+      :open="addDialogOpen"
+      :adapter="videoFavoriteAdapter"
+      :jobs="addDialogJobs"
+      default-name-fallback="播放列表"
+      @close="addDialogOpen = false"
+      @done="onAddDialogDone"
+    />
   </div>
 </template>
 
@@ -1046,16 +1057,6 @@ onBeforeUnmount(() => {
   margin: 0;
 }
 
-.fav-pl-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  -webkit-overflow-scrolling: touch;
-}
-
 .video-pane-lead {
   margin: 0 0 12px;
   font-size: clamp(12px, 3.2vw, 14px);
@@ -1190,55 +1191,6 @@ onBeforeUnmount(() => {
   opacity: 0.65;
 }
 
-.fav-pl-block {
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-height: 0;
-}
-.fav-pl-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.fav-pl-toggle {
-  border: none;
-  background: transparent;
-  color: inherit;
-  padding: 0 4px;
-}
-.fav-pl-name {
-  flex: 1;
-  min-width: 0;
-  text-align: left;
-  border: none;
-  background: transparent;
-  color: #6eb5ff;
-  font-weight: 600;
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.fav-pl-count {
-  font-size: 11px;
-  opacity: 0.65;
-}
-.fav-pl-mini {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(0, 0, 0, 0.2);
-  color: inherit;
-}
-.fav-pl-mini--danger {
-  color: #ffb4b4;
-}
 .stream-pl-empty {
   margin: 8px 0;
   font-size: 12px;

@@ -11,6 +11,8 @@ object VideoSubtitlePrefStore {
     private const val KEY_SUBTITLE_OFFSET_X = "global_subtitle_offset_x"
     private const val KEY_SUBTITLE_OFFSET_Y = "global_subtitle_offset_y"
     private const val KEY_PGS_SCALE = "global_pgs_scale"
+    /** 0=跟隨系統, 1=直版鎖定, 2=橫向鎖定（全域記住） */
+    private const val KEY_ORIENTATION_LOCK = "global_orientation_lock"
     private const val DEFAULT_TEXT_SIZE_SP = 16f
     private const val DEFAULT_PGS_SCALE = 1f
 
@@ -67,6 +69,20 @@ object VideoSubtitlePrefStore {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putFloat(KEY_PGS_SCALE, scale.coerceIn(0.5f, 2f))
+            .apply()
+    }
+
+    fun loadOrientationLockMode(context: Context): Int =
+        context
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(KEY_ORIENTATION_LOCK, 0)
+            .coerceIn(0, 2)
+
+    fun saveOrientationLockMode(context: Context, mode: Int) {
+        context
+            .getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_ORIENTATION_LOCK, mode.coerceIn(0, 2))
             .apply()
     }
 

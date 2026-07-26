@@ -46,7 +46,9 @@ import {
   saveRemoteBrowseLayout,
   type RemoteBrowseLayout,
 } from '../remoteBrowseLayout'
-import { isComicZipFileName, isVideoFileName } from '../remoteBrowseMedia'
+import { clearRemoteBrowseCoverIndexCache } from '../remoteBrowseCover'
+import { clearThumbCacheForHost, isComicZipFileName, isVideoFileName } from '../remoteBrowseMedia'
+import { migrateStreamFavoritesMountPaths } from '../migrateFavoriteMountPaths'
 import RemoteBrowseEntryThumb from './RemoteBrowseEntryThumb.vue'
 
 const props = defineProps<{
@@ -459,8 +461,24 @@ async function loadDirectory(path: string) {
   loading.value = true
   error.value = ''
   try {
+    // 僅同路徑重載（刪改後刷新）才清縮圖；進子目錄／返回時保留，避免瞬間打爆 PC 連線造成隨機缺圖
+    if (!pathChanging) {
+      clearThumbCacheForHost(host.value, props.pc.port)
+      clearRemoteBrowseCoverIndexCache(host.value, props.pc.port)
+    }
     browse.value = await listRemotePcDirectory(host.value, props.pc.port, path)
     currentPath.value = browse.value.path
+    const mounts = browse.value.shareMounts ?? []
+    if (mounts.length > 0) {
+      migrateStreamFavoritesMountPaths(
+        mounts.map((m) => ({
+          label: m.label,
+          display: m.display,
+          volumeGuid: m.volumeGuid,
+          legacyLabels: m.legacyLabels,
+        })),
+      )
+    }
   } catch (e) {
     error.value = formatInvokeError(e)
     browse.value = null
@@ -532,7 +550,28 @@ async function collectStreamJobsFromSelection(
   return jobs
 }
 
-async function startStreamRead() {
+function isStreamableMediaName(name: string): boolean {
+  return isVideoFile(name) || isComicZipFile(name)
+}
+
+/** 一次掃描，自動拆成影片／漫畫佇列 */
+async function collectPartitionedStreamJobs(): Promise<{
+  videos: StreamJob[]
+  comics: StreamJob[]
+}> {
+  const mixed = await collectStreamJobsFromSelection(isStreamableMediaName)
+  const videos: StreamJob[] = []
+  const comics: StreamJob[] = []
+  for (const job of mixed) {
+    const name = job.title || job.relPath
+    if (isVideoFile(name)) videos.push(job)
+    else if (isComicZipFile(name)) comics.push(job)
+  }
+  return { videos, comics }
+}
+
+/** 整合「串流閱讀／串流播放」：依副檔名自動辨識並加入對應佇列 */
+async function startStreamAuto() {
   closeActionMenus()
   const h = host.value
   if (!h) {
@@ -540,53 +579,44 @@ async function startStreamRead() {
     return
   }
   if (selectedItems.value.size === 0) {
-    showFlashHint('請勾選 ZIP/CBZ 漫畫或資料夾')
+    showFlashHint('請勾選影片、ZIP/CBZ 漫畫或資料夾')
     return
   }
   remoteBusy.value = true
   try {
-    showFlashHint('正在掃描漫畫檔…', 2500)
-    const jobs = await collectStreamJobsFromSelection(isComicZipFile)
-    if (jobs.length === 0) {
-      showFlashHint('所選項目內沒有可串流閱讀的 ZIP/CBZ')
+    showFlashHint('正在掃描可串流檔案…', 2500)
+    const { videos, comics } = await collectPartitionedStreamJobs()
+    if (videos.length === 0 && comics.length === 0) {
+      showFlashHint('所選項目內沒有可串流的影片或漫畫')
       return
     }
-    queueRemoteComicStreamPlay(jobs)
-    comicStreamLog(`來源 PC：${h}:${props.pc.port}（${jobs.length} 本）`)
-    if (jobs.length === 1) {
-      activateComicStreamQueueJob(jobs[0]!, jobs)
+    if (videos.length > 0) {
+      queueRemoteStreamPlay(videos)
+      streamLog(`來源 PC：${h}:${props.pc.port}（${videos.length} 部影片）`)
+    }
+    if (comics.length > 0) {
+      queueRemoteComicStreamPlay(comics)
+      comicStreamLog(`來源 PC：${h}:${props.pc.port}（${comics.length} 本漫畫）`)
+    }
+    if (videos.length > 0 && comics.length > 0) {
+      showFlashHint(`已加入 ${videos.length} 部影片、${comics.length} 本漫畫`, 2800)
+      if (comics.length > videos.length) {
+        if (comics.length === 1) activateComicStreamQueueJob(comics[0]!, comics)
+        else requestNavigateToComicStream()
+      } else {
+        requestNavigateToVideoTab()
+      }
+      return
+    }
+    if (videos.length > 0) {
+      requestNavigateToVideoTab()
+      return
+    }
+    if (comics.length === 1) {
+      activateComicStreamQueueJob(comics[0]!, comics)
     } else {
       requestNavigateToComicStream()
     }
-  } catch (e) {
-    showFlashHint(formatInvokeError(e), 2800)
-  } finally {
-    remoteBusy.value = false
-  }
-}
-
-async function startStreamPlay() {
-  closeActionMenus()
-  const h = host.value
-  if (!h) {
-    showFlashHint('未連線 PC')
-    return
-  }
-  if (selectedItems.value.size === 0) {
-    showFlashHint('請勾選影片檔或資料夾')
-    return
-  }
-  remoteBusy.value = true
-  try {
-    showFlashHint('正在掃描影片…', 2500)
-    const jobs = await collectStreamJobsFromSelection(isVideoFile)
-    if (jobs.length === 0) {
-      showFlashHint('所選項目內沒有可播放的影片')
-      return
-    }
-    queueRemoteStreamPlay(jobs)
-    streamLog(`來源 PC：${h}:${props.pc.port}（${jobs.length} 部）`)
-    requestNavigateToVideoTab()
   } catch (e) {
     showFlashHint(formatInvokeError(e), 2800)
   } finally {
@@ -1125,26 +1155,14 @@ watch(
           </div>
         </div>
         <div class="remote-browse-actions-right">
-          <div class="remote-upload-menu-wrap">
-            <button
-              type="button"
-              class="tool tool--ghost"
-              :disabled="remoteBusy"
-              @click.stop="
-                () => {
-                  const next = !streamMenuOpen
-                  closeActionMenus()
-                  streamMenuOpen = next
-                }
-              "
-            >
-              串流 ▾
-            </button>
-            <div v-if="streamMenuOpen" class="remote-upload-menu" @click.stop>
-              <button type="button" @click="startStreamRead">串流閱讀</button>
-              <button type="button" @click="startStreamPlay">串流播放</button>
-            </div>
-          </div>
+          <button
+            type="button"
+            class="tool tool--ghost"
+            :disabled="remoteBusy || selectedCount === 0"
+            @click="startStreamAuto"
+          >
+            串流
+          </button>
           <div class="remote-upload-menu-wrap">
             <button
               type="button"
@@ -1174,8 +1192,8 @@ watch(
         <span class="remote-browse-pc">{{ displayPcName }}</span>
         <span class="remote-browse-path">{{ pathLabel }}</span>
         <span class="remote-browse-hint"
-          >勾選後「操作」剪下/複製/貼上/刪除/重新命名/新建資料夾；「傳輸」上傳/下載；勾選 ZIP/CBZ 或資料夾後「串流 →
-          串流閱讀」、勾選影片或資料夾後「串流 → 串流播放」（漫畫閱讀需 PC remote_api≥8）</span
+          >勾選後「操作」剪下/複製/貼上/刪除/重新命名/新建資料夾；「傳輸」上傳/下載；勾選影片、ZIP/CBZ
+          或資料夾後按「串流」（自動辨識影片／漫畫；漫畫閱讀需 PC remote_api≥8）</span
         >
       </div>
     </div>

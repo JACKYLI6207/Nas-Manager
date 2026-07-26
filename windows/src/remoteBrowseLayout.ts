@@ -1,9 +1,18 @@
 /** 遠端管理瀏覽顯示方式（與站內搜索 layout 分開儲存） */
-export type RemoteBrowseLayout = 'list' | 'grid2' | 'grid4' | 'grid6' | 'grid8' | 'grid10'
+export type RemoteBrowseLayout =
+  | 'list'
+  | 'grid1'
+  | 'grid2'
+  | 'grid4'
+  | 'grid6'
+  | 'grid8'
+  | 'grid10'
 
 const LAYOUT_KEY = 'nas-remote-browse-layout'
 
 export const REMOTE_BROWSE_LAYOUT_OPTIONS: { key: RemoteBrowseLayout; label: string }[] = [
+  { key: 'grid1', label: '每排 1 個' },
+  { key: 'grid2', label: '每排 2 個' },
   { key: 'grid4', label: '每排 4 個' },
   { key: 'grid6', label: '每排 6 個' },
   { key: 'grid8', label: '每排 8 個' },
@@ -11,10 +20,20 @@ export const REMOTE_BROWSE_LAYOUT_OPTIONS: { key: RemoteBrowseLayout; label: str
   { key: 'list', label: '列表顯示' },
 ]
 
-const VALID = new Set<RemoteBrowseLayout>(['list', 'grid2', 'grid4', 'grid6', 'grid8', 'grid10'])
+const VALID = new Set<RemoteBrowseLayout>([
+  'list',
+  'grid1',
+  'grid2',
+  'grid4',
+  'grid6',
+  'grid8',
+  'grid10',
+])
 
 export function gridColsForRemoteBrowseLayout(layout: RemoteBrowseLayout): number {
   switch (layout) {
+    case 'grid1':
+      return 1
     case 'grid2':
       return 2
     case 'grid6':

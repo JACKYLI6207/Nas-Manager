@@ -58,20 +58,9 @@ function setComicSubTab(tab: ComicReadSubTab) {
         v-show="comicReadSubTab === 'streamList' || comicReadSubTab === 'streamFav' || comicReadSubTab === 'streamLog'"
         class="comic-sub-pane comic-sub-pane--stream-side"
       >
+        <!-- 單一實例：切換列表／收藏只改 tab，避免重掛 StreamFavoritesPanel -->
         <MobileComicStreamPanel
-          v-if="comicReadSubTab === 'streamList'"
-          key="stream-list"
-          tab="streamList"
-        />
-        <MobileComicStreamPanel
-          v-else-if="comicReadSubTab === 'streamFav'"
-          key="stream-fav"
-          tab="streamFav"
-        />
-        <MobileComicStreamPanel
-          v-else-if="comicReadSubTab === 'streamLog'"
-          key="stream-log"
-          tab="streamLog"
+          :tab="(comicReadSubTab === 'home' ? 'streamList' : comicReadSubTab) as Exclude<ComicReadSubTab, 'home'>"
         />
       </div>
     </div>

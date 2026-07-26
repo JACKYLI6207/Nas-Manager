@@ -10,11 +10,17 @@ use crate::volume_binding;
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareMount {
-    /// API 路徑第一層（URL 安全、唯一）
+    /// API 路徑第一層（URL 安全、唯一）。有 Volume GUID 時為 `vol_<guid>`（穩定，不隨磁碟代號變）。
     pub label: String,
     /// 手機／UI 顯示用完整路徑（如 `H:\`、`E:\漫畫`）
     pub display: String,
     pub root: PathBuf,
+    /// Windows Volume GUID（無大括號）；空字串表示舊路徑模式／無法綁定
+    #[serde(default)]
+    pub volume_guid: String,
+    /// 舊版以顯示路徑衍生的 label（如 `H--`），供解析舊收藏／舊客戶端路徑
+    #[serde(default)]
+    pub legacy_labels: Vec<String>,
 }
 
 fn default_share_slots() -> u32 {
@@ -165,6 +171,38 @@ fn api_label_from_display(display: &str, used: &mut std::collections::HashSet<St
     label
 }
 
+/// 以 Volume GUID 產生穩定 API 根名稱（不隨磁碟代號 H:→I: 變動）。
+fn api_label_from_volume_guid(
+    volume_guid: &str,
+    relative_path: &str,
+    used: &mut std::collections::HashSet<String>,
+) -> String {
+    let guid = volume_guid
+        .trim()
+        .trim_matches(|c| c == '{' || c == '}')
+        .to_ascii_lowercase();
+    let mut slug = if guid.is_empty() {
+        "vol".to_string()
+    } else {
+        format!("vol_{guid}")
+    };
+    let rel = relative_path
+        .replace('\\', "/")
+        .trim_matches('/')
+        .replace('/', "-")
+        .replace(':', "-");
+    if !rel.is_empty() {
+        slug = format!("{slug}_{rel}");
+    }
+    let mut label = slug.clone();
+    let mut n = 2u32;
+    while !used.insert(label.clone()) {
+        label = format!("{slug}-{n}");
+        n += 1;
+    }
+    label
+}
+
 pub fn build_share_mounts(config: &Config) -> anyhow::Result<Vec<ShareMount>> {
     let bindings: Vec<&ShareRootBinding> = config
         .remote_management_share_roots
@@ -211,11 +249,30 @@ fn push_share_mount(
         None => share_display_label(&dir),
     };
     let root = std::fs::canonicalize(&dir).unwrap_or(dir);
-    let label = api_label_from_display(&display, used_labels);
+    // 先算舊版 display label（並佔用 used），供相容舊收藏路徑
+    let legacy_label = api_label_from_display(&display, used_labels);
+    let (label, volume_guid, legacy_labels) = match binding {
+        Some(b) if !b.volume_guid.trim().is_empty() => {
+            let guid_label =
+                api_label_from_volume_guid(&b.volume_guid, &b.relative_path, used_labels);
+            let guid = b
+                .volume_guid
+                .trim()
+                .trim_matches(|c| c == '{' || c == '}')
+                .to_string();
+            let mut legacy = vec![legacy_label];
+            // 若 GUID label 與 legacy 相同（極少見），不要重複
+            legacy.retain(|l| l != &guid_label);
+            (guid_label, guid, legacy)
+        }
+        _ => (legacy_label, String::new(), Vec::new()),
+    };
     mounts.push(ShareMount {
         label,
         display,
         root,
+        volume_guid,
+        legacy_labels,
     });
     Ok(())
 }

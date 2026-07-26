@@ -38,6 +38,7 @@ import {
   queueRemoteStreamPlay,
   requestNavigateToVideoTab,
   streamLog,
+  type RemoteStreamJob,
 } from '../videoStreamStore'
 import {
   gridColsForRemoteBrowseLayout,
@@ -47,8 +48,18 @@ import {
   saveRemoteBrowseLayout,
   type RemoteBrowseLayout,
 } from '../remoteBrowseLayout'
-import { isComicZipFileName, isVideoFileName } from '../remoteBrowseMedia'
+import { clearRemoteBrowseCoverIndexCache } from '../remoteBrowseCover'
+import { clearThumbCacheForHost, isComicZipFileName, isVideoFileName } from '../remoteBrowseMedia'
+import { migrateStreamFavoritesMountPaths } from '../migrateFavoriteMountPaths'
+import { comicFavoriteAdapter } from '../comicStreamPlaylistStorage'
+import { videoFavoriteAdapter } from '../streamPlaylistStorage'
+import type {
+  FavoriteJobGroup,
+  FavoriteStreamAdapter,
+  FavoriteStreamStateBase,
+} from '../streamFavoriteTypes'
 import RemoteBrowseEntryThumb from './RemoteBrowseEntryThumb.vue'
+import StreamFavoriteAddDialog from './StreamFavoriteAddDialog.vue'
 
 const props = defineProps<{
   pc: RemotePcListItem
@@ -87,6 +98,8 @@ let pendingUploadConflictResolve: ((policy: RemoteUploadConflictPolicy | null) =
 const transferProgress = ref<RemoteTransferProgressEvent | null>(null)
 const transferStartedAt = ref(0)
 const transferElapsedTick = ref(0)
+/** 完成後凍結用時（秒），避免計時器停了畫面仍跟著 Date.now 跑 */
+const transferElapsedFrozenSec = ref<number | null>(null)
 let transferElapsedTimer: number | null = null
 const transferDebugLog = ref<string[]>([])
 const transferLogRef = ref<HTMLTextAreaElement | null>(null)
@@ -159,7 +172,10 @@ const transferOverlayTitle = computed(() => {
 const transferElapsedText = computed(() => {
   void transferElapsedTick.value
   if (!transferStartedAt.value) return ''
-  const sec = Math.max(0, Math.floor((Date.now() - transferStartedAt.value) / 1000))
+  const sec =
+    transferElapsedFrozenSec.value != null
+      ? transferElapsedFrozenSec.value
+      : Math.max(0, Math.floor((Date.now() - transferStartedAt.value) / 1000))
   const m = Math.floor(sec / 60)
   const s = sec % 60
   return m > 0 ? `用時 ${m}:${String(s).padStart(2, '0')}` : `用時 ${sec} 秒`
@@ -168,6 +184,7 @@ const transferElapsedText = computed(() => {
 function startOverlayElapsedTimer() {
   transferStartedAt.value = Date.now()
   transferElapsedTick.value = 0
+  transferElapsedFrozenSec.value = null
   if (transferElapsedTimer != null) {
     window.clearInterval(transferElapsedTimer)
   }
@@ -180,6 +197,12 @@ function stopOverlayElapsedTimer() {
   if (transferElapsedTimer != null) {
     window.clearInterval(transferElapsedTimer)
     transferElapsedTimer = null
+  }
+  if (transferStartedAt.value > 0 && transferElapsedFrozenSec.value == null) {
+    transferElapsedFrozenSec.value = Math.max(
+      0,
+      Math.floor((Date.now() - transferStartedAt.value) / 1000),
+    )
   }
 }
 
@@ -460,8 +483,24 @@ async function loadDirectory(path: string) {
   loading.value = true
   error.value = ''
   try {
+    // 僅同路徑重載（刪改後刷新）才清縮圖；進子目錄／返回時保留，避免瞬間打爆 PC 連線造成隨機缺圖
+    if (!pathChanging) {
+      clearThumbCacheForHost(host.value, props.pc.port)
+      clearRemoteBrowseCoverIndexCache(host.value, props.pc.port)
+    }
     browse.value = await listRemotePcDirectory(host.value, props.pc.port, path)
     currentPath.value = browse.value.path
+    const mounts = browse.value.shareMounts ?? []
+    if (mounts.length > 0) {
+      migrateStreamFavoritesMountPaths(
+        mounts.map((m) => ({
+          label: m.label,
+          display: m.display,
+          volumeGuid: m.volumeGuid,
+          legacyLabels: m.legacyLabels,
+        })),
+      )
+    }
   } catch (e) {
     error.value = formatInvokeError(e)
     browse.value = null
@@ -497,9 +536,24 @@ type StreamJob = {
   pcName?: string
 }
 
-async function collectStreamJobsFromSelection(
+const favAddDialogOpen = ref(false)
+const favAddDialogJobs = ref<RemoteStreamJob[]>([])
+const favAddDialogGroups = ref<FavoriteJobGroup[]>([])
+const favAddDialogAdapter = ref<FavoriteStreamAdapter<FavoriteStreamStateBase, RemoteStreamJob>>(
+  videoFavoriteAdapter,
+)
+const favAddDialogFallback = ref('收藏')
+
+function sortStreamJobs(jobs: StreamJob[]): StreamJob[] {
+  return [...jobs].sort((a, b) =>
+    a.relPath.localeCompare(b.relPath, undefined, { numeric: true, sensitivity: 'base' }),
+  )
+}
+
+/** 每個勾選根路徑各自一組（收藏「新增名稱」逐組命名用） */
+async function collectStreamJobGroupsFromSelection(
   matchFile: (name: string) => boolean,
-): Promise<StreamJob[]> {
+): Promise<FavoriteJobGroup[]> {
   const h = host.value
   if (!h) return []
   const paths = Array.from(selectedItems.value.keys())
@@ -510,9 +564,12 @@ async function collectStreamJobsFromSelection(
     paths.map((path) => listRemotePcFiles(h, props.pc.port, path)),
   )
 
-  const seen = new Set<string>()
-  const jobs: StreamJob[] = []
-  for (const files of lists) {
+  const groups: FavoriteJobGroup[] = []
+  for (let i = 0; i < paths.length; i++) {
+    const path = paths[i]!
+    const files = lists[i] ?? []
+    const seen = new Set<string>()
+    const jobs: StreamJob[] = []
     for (const file of files) {
       const relPath = file.relativePath.replace(/\\/g, '/')
       const name = baseName(relPath)
@@ -526,14 +583,104 @@ async function collectStreamJobsFromSelection(
         pcName,
       })
     }
+    if (jobs.length === 0) continue
+    const folderLabel = baseName(path.replace(/\\/g, '/').replace(/\/+$/, '')) || path || '收藏'
+    groups.push({ defaultName: folderLabel, jobs: sortStreamJobs(jobs) })
   }
-  jobs.sort((a, b) =>
-    a.relPath.localeCompare(b.relPath, undefined, { numeric: true, sensitivity: 'base' }),
-  )
-  return jobs
+  return groups
 }
 
-async function startStreamRead() {
+async function collectStreamJobsFromSelection(
+  matchFile: (name: string) => boolean,
+): Promise<StreamJob[]> {
+  const groups = await collectStreamJobGroupsFromSelection(matchFile)
+  const seen = new Set<string>()
+  const jobs: StreamJob[] = []
+  for (const g of groups) {
+    for (const job of g.jobs) {
+      if (seen.has(job.relPath)) continue
+      seen.add(job.relPath)
+      jobs.push(job)
+    }
+  }
+  return sortStreamJobs(jobs)
+}
+
+function isStreamableMediaName(name: string): boolean {
+  return isVideoFile(name) || isComicZipFile(name)
+}
+
+/** 一次掃描，自動拆成影片／漫畫佇列 */
+async function collectPartitionedStreamJobs(): Promise<{
+  videos: StreamJob[]
+  comics: StreamJob[]
+}> {
+  const mixed = await collectStreamJobsFromSelection(isStreamableMediaName)
+  const videos: StreamJob[] = []
+  const comics: StreamJob[] = []
+  for (const job of mixed) {
+    const name = job.title || job.relPath
+    if (isVideoFile(name)) videos.push(job)
+    else if (isComicZipFile(name)) comics.push(job)
+  }
+  return { videos, comics }
+}
+
+/** 整合「串流閱讀／串流播放」：依副檔名自動辨識並加入對應佇列 */
+async function startStreamAuto() {
+  closeActionMenus()
+  const h = host.value
+  if (!h) {
+    showFlashHint('未連線 PC')
+    return
+  }
+  if (selectedItems.value.size === 0) {
+    showFlashHint('請勾選影片、ZIP/CBZ 漫畫或資料夾')
+    return
+  }
+  remoteBusy.value = true
+  try {
+    showFlashHint('正在掃描可串流檔案…', 2500)
+    const { videos, comics } = await collectPartitionedStreamJobs()
+    if (videos.length === 0 && comics.length === 0) {
+      showFlashHint('所選項目內沒有可串流的影片或漫畫')
+      return
+    }
+    if (videos.length > 0) {
+      queueRemoteStreamPlay(videos)
+      streamLog(`來源 PC：${h}:${props.pc.port}（${videos.length} 部影片）`)
+    }
+    if (comics.length > 0) {
+      queueRemoteComicStreamPlay(comics)
+      comicStreamLog(`來源 PC：${h}:${props.pc.port}（${comics.length} 本漫畫）`)
+    }
+    if (videos.length > 0 && comics.length > 0) {
+      showFlashHint(`已加入 ${videos.length} 部影片、${comics.length} 本漫畫`, 2800)
+      if (comics.length > videos.length) {
+        if (comics.length === 1) activateComicStreamQueueJob(comics[0]!, comics)
+        else requestNavigateToComicStream()
+      } else {
+        requestNavigateToVideoTab()
+      }
+      return
+    }
+    if (videos.length > 0) {
+      requestNavigateToVideoTab()
+      return
+    }
+    if (comics.length === 1) {
+      activateComicStreamQueueJob(comics[0]!, comics)
+    } else {
+      requestNavigateToComicStream()
+    }
+  } catch (e) {
+    showFlashHint(formatInvokeError(e), 2800)
+  } finally {
+    remoteBusy.value = false
+  }
+}
+
+async function startFavoriteComic() {
   closeActionMenus()
   const h = host.value
   if (!h) {
@@ -547,18 +694,16 @@ async function startStreamRead() {
   remoteBusy.value = true
   try {
     showFlashHint('正在掃描漫畫檔…', 2500)
-    const jobs = await collectStreamJobsFromSelection(isComicZipFile)
-    if (jobs.length === 0) {
-      showFlashHint('所選項目內沒有可串流閱讀的 ZIP/CBZ')
+    const groups = await collectStreamJobGroupsFromSelection(isComicZipFile)
+    if (groups.length === 0) {
+      showFlashHint('所選項目內沒有可收藏的 ZIP/CBZ')
       return
     }
-    queueRemoteComicStreamPlay(jobs)
-    comicStreamLog(`來源 PC：${h}:${props.pc.port}（${jobs.length} 本）`)
-    if (jobs.length === 1) {
-      activateComicStreamQueueJob(jobs[0]!, jobs)
-    } else {
-      requestNavigateToComicStream()
-    }
+    favAddDialogAdapter.value = comicFavoriteAdapter
+    favAddDialogFallback.value = '漫畫收藏'
+    favAddDialogGroups.value = groups
+    favAddDialogJobs.value = groups.flatMap((g) => g.jobs)
+    favAddDialogOpen.value = true
   } catch (e) {
     showFlashHint(formatInvokeError(e), 2800)
   } finally {
@@ -566,7 +711,7 @@ async function startStreamRead() {
   }
 }
 
-async function startStreamPlay() {
+async function startFavoriteVideo() {
   closeActionMenus()
   const h = host.value
   if (!h) {
@@ -580,19 +725,25 @@ async function startStreamPlay() {
   remoteBusy.value = true
   try {
     showFlashHint('正在掃描影片…', 2500)
-    const jobs = await collectStreamJobsFromSelection(isVideoFile)
-    if (jobs.length === 0) {
-      showFlashHint('所選項目內沒有可播放的影片')
+    const groups = await collectStreamJobGroupsFromSelection(isVideoFile)
+    if (groups.length === 0) {
+      showFlashHint('所選項目內沒有可收藏的影片')
       return
     }
-    queueRemoteStreamPlay(jobs)
-    streamLog(`來源 PC：${h}:${props.pc.port}（${jobs.length} 部）`)
-    requestNavigateToVideoTab()
+    favAddDialogAdapter.value = videoFavoriteAdapter
+    favAddDialogFallback.value = '播放列表'
+    favAddDialogGroups.value = groups
+    favAddDialogJobs.value = groups.flatMap((g) => g.jobs)
+    favAddDialogOpen.value = true
   } catch (e) {
     showFlashHint(formatInvokeError(e), 2800)
   } finally {
     remoteBusy.value = false
   }
+}
+
+function onFavoriteAddDialogDone() {
+  showFlashHint('已更新收藏')
 }
 
 function goUp() {
@@ -689,6 +840,7 @@ async function startUpload(kind: 'file' | 'folder') {
         error: errText,
         detailLog: [...transferDebugLog.value, errText].join('\n'),
       }
+      stopOverlayElapsedTimer()
     }
   } finally {
     remoteBusy.value = false
@@ -748,6 +900,7 @@ async function startDownload() {
         error: errText,
         detailLog: [...transferDebugLog.value, errText].join('\n'),
       }
+      stopOverlayElapsedTimer()
     }
   } finally {
     remoteBusy.value = false
@@ -760,6 +913,7 @@ function closeTransferOverlay() {
   copyLogHint.value = ''
   stopOverlayElapsedTimer()
   transferStartedAt.value = 0
+  transferElapsedFrozenSec.value = null
 }
 
 async function cancelActiveTransfer() {
@@ -815,6 +969,7 @@ async function startPaste() {
         finished: true,
         error: errText,
       }
+      stopOverlayElapsedTimer()
     }
   } finally {
     remoteBusy.value = false
@@ -1033,6 +1188,7 @@ onMounted(async () => {
     (ev) => {
       transferProgress.value = ev.payload
       if (ev.payload.finished) {
+        stopOverlayElapsedTimer()
         remoteBusy.value = false
         appendTransferLog(ev.payload.message)
         if (ev.payload.detailLog) {
@@ -1137,30 +1293,32 @@ watch(
               <button type="button" :disabled="remoteBusy" @click="runFileOp('mkdir')">
                 新建資料夾
               </button>
+              <button
+                type="button"
+                :disabled="remoteBusy || selectedCount === 0"
+                @click="startFavoriteComic"
+              >
+                收藏此漫畫
+              </button>
+              <button
+                type="button"
+                :disabled="remoteBusy || selectedCount === 0"
+                @click="startFavoriteVideo"
+              >
+                收藏此影片
+              </button>
             </div>
           </div>
         </div>
         <div class="remote-browse-actions-right">
-          <div class="remote-upload-menu-wrap">
-            <button
-              type="button"
-              class="tool tool--ghost"
-              :disabled="remoteBusy"
-              @click.stop="
-                () => {
-                  const next = !streamMenuOpen
-                  closeActionMenus()
-                  streamMenuOpen = next
-                }
-              "
-            >
-              串流 ▾
-            </button>
-            <div v-if="streamMenuOpen" class="remote-upload-menu" @click.stop>
-              <button type="button" @click="startStreamRead">串流閱讀</button>
-              <button type="button" @click="startStreamPlay">串流播放</button>
-            </div>
-          </div>
+          <button
+            type="button"
+            class="tool tool--ghost"
+            :disabled="remoteBusy || selectedCount === 0"
+            @click="startStreamAuto"
+          >
+            串流
+          </button>
           <div class="remote-upload-menu-wrap">
             <button
               type="button"
@@ -1189,10 +1347,6 @@ watch(
       <div class="remote-browse-title">
         <span class="remote-browse-pc">{{ displayPcName }}</span>
         <span class="remote-browse-path">{{ pathLabel }}</span>
-        <span class="remote-browse-hint"
-          >勾選後「操作」剪下/複製/貼上/刪除/重新命名/新建資料夾；「傳輸」上傳/下載；勾選 ZIP/CBZ 或資料夾後「串流 →
-          串流閱讀」、勾選影片或資料夾後「串流 → 串流播放」（漫畫閱讀需 PC remote_api≥8）</span
-        >
       </div>
     </div>
 
@@ -1518,6 +1672,16 @@ watch(
         </button>
       </div>
     </div>
+
+    <StreamFavoriteAddDialog
+      :open="favAddDialogOpen"
+      :adapter="favAddDialogAdapter"
+      :jobs="favAddDialogJobs"
+      :job-groups="favAddDialogGroups"
+      :default-name-fallback="favAddDialogFallback"
+      @close="favAddDialogOpen = false; favAddDialogGroups = []"
+      @done="onFavoriteAddDialogDone"
+    />
   </div>
 </template>
 
@@ -1936,11 +2100,6 @@ watch(
   font-size: 12px;
   line-height: 1.45;
   word-break: break-word;
-}
-
-.remote-browse-hint {
-  font-size: 12px;
-  opacity: 0.7;
 }
 
 .remote-browse-status {

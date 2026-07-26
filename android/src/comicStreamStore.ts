@@ -6,6 +6,8 @@ import type { RemoteStreamJob } from './videoStreamStore'
 /** 與影片串流相同結構：host + port + relPath + title */
 export type RemoteComicStreamJob = RemoteStreamJob
 
+export type ComicReturnSubTab = 'home' | 'streamList' | 'streamFav' | 'streamLog'
+
 export const comicStreamSession = reactive({
   jobs: [] as RemoteComicStreamJob[],
   logLines: [] as string[],
@@ -14,6 +16,10 @@ export const comicStreamSession = reactive({
   navigateSeq: 0,
   /** 切換到串流閱讀子分頁後自動開讀 */
   pendingRead: false,
+  /** 閱讀結束後要回到的子分頁（從串流收藏點讀時為 streamFav） */
+  returnSubTab: null as ComicReturnSubTab | null,
+  /** 每次換佇列遞增，避免與舊開啟競態 */
+  playGeneration: 0,
 })
 
 export const comicStreamPageSrcMap = ref(new Map<number, string>())
@@ -42,6 +48,8 @@ export function getFullComicStreamQueue(): RemoteComicStreamJob[] {
 
 export function queueRemoteComicStreamPlay(jobs: RemoteComicStreamJob[]) {
   clearComicStreamLog()
+  comicStreamSession.playGeneration += 1
+  comicStreamSession.returnSubTab = null
   comicStreamSession.jobs = [...jobs]
   comicStreamSession.active = jobs.length > 0
   comicStreamSession.currentJob = null
@@ -100,7 +108,10 @@ export function comicJobKey(job: RemoteComicStreamJob): string {
 export function activateComicStreamQueueJob(
   target: RemoteComicStreamJob,
   sourceJobs?: RemoteComicStreamJob[],
+  opts?: { fromFavorites?: boolean },
 ) {
+  comicStreamSession.playGeneration += 1
+  comicStreamSession.returnSubTab = opts?.fromFavorites ? 'streamFav' : null
   if (sourceJobs != null) {
     comicStreamSession.jobs = sourceJobs.map((j) => ({ ...j }))
   } else {
@@ -115,6 +126,12 @@ export function activateComicStreamQueueJob(
   comicReadSubTab.value = 'home'
   comicStreamLog(`切換閱讀：${target.title}`)
   requestNavigateToComicStream()
+}
+
+export function consumeComicReturnSubTab(): ComicReturnSubTab | null {
+  const tab = comicStreamSession.returnSubTab
+  comicStreamSession.returnSubTab = null
+  return tab
 }
 
 export function resetComicStreamReaderUi() {

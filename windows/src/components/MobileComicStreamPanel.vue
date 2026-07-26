@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { copyTextFromTextarea } from '../copyText'
 import {
   activateComicStreamQueueJob,
@@ -13,12 +13,8 @@ import {
   type RemoteComicStreamJob,
 } from '../comicStreamStore'
 import {
-  addFavoriteComicStreamPlaylist,
-  loadFavoriteComicStreamPlaylists,
-  removeFavoriteComicStreamPlaylist,
-  removeFavoriteComicStreamPlaylistItem,
-  renameFavoriteComicStreamPlaylist,
-  type FavoriteComicStreamPlaylist,
+  comicFavoriteAdapter,
+  comicFavoritePlaylistsRevision,
 } from '../comicStreamPlaylistStorage'
 import {
   formatComicStreamProgressLabel,
@@ -26,6 +22,8 @@ import {
 } from '../comicStreamProgress'
 import { comicReadSubTab, type ComicReadSubTab } from '../comicReadUi'
 import StreamPlaylistList from './StreamPlaylistList.vue'
+import StreamFavoritesPanel from './StreamFavoritesPanel.vue'
+import StreamFavoriteAddDialog from './StreamFavoriteAddDialog.vue'
 import '../readerShared.css'
 
 const props = defineProps<{
@@ -34,8 +32,16 @@ const props = defineProps<{
 
 const streamLogRef = ref<HTMLTextAreaElement | null>(null)
 const copyLogHint = ref('')
-const favoritePlaylists = ref<FavoriteComicStreamPlaylist[]>([])
-const expandedFavoriteIds = ref<Set<string>>(new Set())
+const addDialogOpen = ref(false)
+const addDialogJobs = ref<RemoteComicStreamJob[]>([])
+/** 首次進入串流收藏才掛載面板，之後保留，避免列表↔收藏重掛卡頓 */
+const favoritesEverOpened = ref(props.tab === 'streamFav')
+watch(
+  () => props.tab,
+  (tab) => {
+    if (tab === 'streamFav') favoritesEverOpened.value = true
+  },
+)
 
 const streamLogText = computed(() => comicStreamSession.logLines.join('\n'))
 const hasStreamLog = computed(() => comicStreamSession.logLines.length > 0)
@@ -44,21 +50,6 @@ const fullQueueCount = computed(() => fullQueue.value.length)
 const currentJobKey = computed(() =>
   comicStreamSession.currentJob ? comicJobKey(comicStreamSession.currentJob) : null,
 )
-
-function reloadFavoritePlaylists() {
-  favoritePlaylists.value = loadFavoriteComicStreamPlaylists()
-}
-
-function isFavoriteExpanded(id: string): boolean {
-  return expandedFavoriteIds.value.has(id)
-}
-
-function toggleFavoriteExpanded(id: string) {
-  const next = new Set(expandedFavoriteIds.value)
-  if (next.has(id)) next.delete(id)
-  else next.add(id)
-  expandedFavoriteIds.value = next
-}
 
 function streamProgressLabel(job: RemoteComicStreamJob): string | null {
   return formatComicStreamProgressLabel(job)
@@ -85,39 +76,26 @@ function onClearQueue() {
 function onFavoriteCurrentList() {
   const jobs = getFullComicStreamQueue()
   if (jobs.length === 0) return
-  const suggested = `漫畫 ${new Date().toLocaleDateString('zh-TW')}`
-  const name = window.prompt('收藏列表名稱', suggested)
-  if (name === null) return
-  favoritePlaylists.value = addFavoriteComicStreamPlaylist(name, jobs)
-  comicStreamLog(`已加入串流收藏：${name.trim() || suggested}`)
+  addDialogJobs.value = jobs
+  addDialogOpen.value = true
 }
 
-function onLoadFavorite(pl: FavoriteComicStreamPlaylist) {
-  comicStreamSession.jobs = pl.jobs.map((j) => ({ ...j }))
+function onAddDialogDone() {
+  comicStreamLog('已更新串流收藏')
+}
+
+function onLoadFavoritePlaylist(jobs: RemoteComicStreamJob[], name: string) {
+  if (jobs.length === 0) return
+  comicStreamSession.jobs = jobs.map((j) => ({ ...j }))
   comicStreamSession.currentJob = null
   comicStreamSession.active = true
-  comicStreamLog(`載入串流收藏：${pl.name}（${pl.jobs.length} 本）`)
+  comicStreamLog(`載入串流收藏：${name}（${jobs.length} 本）`)
   comicReadSubTab.value = 'streamList'
 }
 
-function onPickFavoriteJob(pl: FavoriteComicStreamPlaylist, job: (typeof pl.jobs)[number]) {
-  activateComicStreamQueueJob(job, pl.jobs)
+function onPlayFavoriteItem(job: RemoteComicStreamJob, sourceJobs: RemoteComicStreamJob[]) {
+  activateComicStreamQueueJob(job, sourceJobs, { fromFavorites: true })
   comicReadSubTab.value = 'home'
-}
-
-function onRenameFavorite(id: string, currentName: string) {
-  const name = window.prompt('重新命名', currentName)
-  if (name === null) return
-  favoritePlaylists.value = renameFavoriteComicStreamPlaylist(id, name)
-}
-
-function onRemoveFavorite(id: string) {
-  if (!window.confirm('確定刪除此收藏？')) return
-  favoritePlaylists.value = removeFavoriteComicStreamPlaylist(id)
-}
-
-function onRemoveFavoriteItem(plId: string, job: FavoriteComicStreamPlaylist['jobs'][number]) {
-  favoritePlaylists.value = removeFavoriteComicStreamPlaylistItem(plId, job)
 }
 
 async function copyStreamLog() {
@@ -130,9 +108,6 @@ async function copyStreamLog() {
   }, 2500)
 }
 
-onMounted(() => {
-  if (props.tab === 'streamFav') reloadFavoritePlaylists()
-})
 </script>
 
 <template>
@@ -167,41 +142,26 @@ onMounted(() => {
         :progress-for-job="streamProgressLabel"
         :opened-for-job="streamOpenedMark"
         show-remove
-        empty-text="尚無項目；在遠端管理勾選 ZIP/CBZ 後「串流 → 串流閱讀」"
+        empty-text="尚無項目；在遠端管理勾選 ZIP/CBZ 後按「串流」"
         @play="onPickQueueJob"
         @remove="onRemoveQueueJob"
       />
     </div>
 
-    <!-- 串流收藏 -->
+    <!-- 串流收藏（主分類 → 收藏名稱 → 項目） -->
     <div v-show="tab === 'streamFav'" class="comic-stream-pane">
-      <p class="comic-stream-heading comic-stream-heading--solo">串流收藏（{{ favoritePlaylists.length }}）</p>
-      <div class="fav-pl-scroll">
-        <p v-if="favoritePlaylists.length === 0" class="stream-pl-empty">
-          尚無收藏；在「串流列表」按「★ 收藏此列表」
-        </p>
-        <div v-for="pl in favoritePlaylists" :key="pl.id" class="fav-pl-block">
-          <div class="fav-pl-head">
-            <button type="button" class="fav-pl-toggle" @click="toggleFavoriteExpanded(pl.id)">
-              {{ isFavoriteExpanded(pl.id) ? '▼' : '▶' }}
-            </button>
-            <button type="button" class="fav-pl-name" @click="onLoadFavorite(pl)">{{ pl.name }}</button>
-            <span class="fav-pl-count">{{ pl.jobs.length }} 本</span>
-            <button type="button" class="fav-pl-mini" @click="onRenameFavorite(pl.id, pl.name)">改名</button>
-            <button type="button" class="fav-pl-mini fav-pl-mini--danger" @click="onRemoveFavorite(pl.id)">刪</button>
-          </div>
-          <StreamPlaylistList
-            v-if="isFavoriteExpanded(pl.id)"
-            fill
-            :jobs="pl.jobs"
-            :progress-for-job="streamProgressLabel"
-            :opened-for-job="streamOpenedMark"
-            show-remove
-            @play="(job) => onPickFavoriteJob(pl, job)"
-            @remove="(job) => onRemoveFavoriteItem(pl.id, job)"
-          />
-        </div>
-      </div>
+      <StreamFavoritesPanel
+        v-if="favoritesEverOpened"
+        :adapter="comicFavoriteAdapter"
+        media="comic"
+        :current-key="currentJobKey"
+        :revision="comicFavoritePlaylistsRevision"
+        :progress-for-job="streamProgressLabel"
+        :opened-for-job="streamOpenedMark"
+        empty-hint="尚無收藏；在「串流列表」按「★ 收藏此列表」"
+        @load-playlist="onLoadFavoritePlaylist"
+        @play-item="onPlayFavoriteItem"
+      />
     </div>
 
     <!-- 串流日誌 -->
@@ -226,6 +186,15 @@ onMounted(() => {
         placeholder="（尚無日誌）"
       />
     </div>
+
+    <StreamFavoriteAddDialog
+      :open="addDialogOpen"
+      :adapter="comicFavoriteAdapter"
+      :jobs="addDialogJobs"
+      default-name-fallback="漫畫收藏"
+      @close="addDialogOpen = false"
+      @done="onAddDialogDone"
+    />
   </div>
 </template>
 
@@ -279,68 +248,6 @@ onMounted(() => {
 .comic-stream-heading--solo {
   flex-shrink: 0;
   margin-bottom: 8px;
-}
-.fav-pl-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.fav-pl-block {
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 10px;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-height: 0;
-}
-.fav-pl-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-.fav-pl-toggle {
-  border: none;
-  background: transparent;
-  color: inherit;
-  padding: 0 4px;
-}
-.fav-pl-name {
-  flex: 1;
-  min-width: 0;
-  text-align: left;
-  border: none;
-  background: transparent;
-  color: #6eb5ff;
-  font-weight: 600;
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.fav-pl-count {
-  font-size: 11px;
-  opacity: 0.65;
-}
-.fav-pl-mini {
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 6px;
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  background: rgba(0, 0, 0, 0.2);
-  color: inherit;
-}
-.fav-pl-mini--danger {
-  color: #ffb4b4;
-}
-.stream-pl-empty {
-  margin: 8px 0;
-  font-size: 12px;
-  opacity: 0.7;
 }
 .stream-log-text {
   flex: 1;

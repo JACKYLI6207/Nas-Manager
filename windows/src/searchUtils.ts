@@ -27,7 +27,7 @@ const FAV_PAGE_SIZE_KEY = 'gm-android-favoritesPageSize'
 const FAV_LAYOUT_KEY = 'gm-android-favoritesLayout'
 
 /** 與 PC comicBrowseLayout 對齊；手機端 list 為橫向緊湊列表 */
-export type GridLayout = 'list' | 'grid2' | 'grid4' | 'grid6' | 'grid8' | 'grid10'
+export type GridLayout = 'list' | 'grid1' | 'grid2' | 'grid4' | 'grid6' | 'grid8' | 'grid10'
 
 export const PAGE_SIZE_OPTIONS = [20, 40, 60, 80, 100] as const
 
@@ -39,6 +39,7 @@ export const SEARCH_SORT_OPTIONS: { label: string; key: SearchSortOrder }[] = [
 ]
 
 export const LAYOUT_OPTIONS: { key: GridLayout; label: string }[] = [
+  { key: 'grid1', label: '每排 1 個' },
   { key: 'grid2', label: '每排 2 個' },
   { key: 'grid4', label: '每排 4 個' },
   { key: 'grid6', label: '每排 6 個' },
@@ -49,6 +50,8 @@ export const LAYOUT_OPTIONS: { key: GridLayout; label: string }[] = [
 
 export function gridColsForLayout(layout: GridLayout): number {
   switch (layout) {
+    case 'grid1':
+      return 1
     case 'grid2':
       return 2
     case 'grid6':
@@ -116,7 +119,15 @@ export function savePageSize(size: number) {
   localStorage.setItem(PAGE_SIZE_KEY, String(size))
 }
 
-const VALID_LAYOUTS = new Set<GridLayout>(['list', 'grid2', 'grid4', 'grid6', 'grid8', 'grid10'])
+const VALID_LAYOUTS = new Set<GridLayout>([
+  'list',
+  'grid1',
+  'grid2',
+  'grid4',
+  'grid6',
+  'grid8',
+  'grid10',
+])
 
 export function loadSavedLayout(): GridLayout {
   const saved = localStorage.getItem(LAYOUT_KEY)
