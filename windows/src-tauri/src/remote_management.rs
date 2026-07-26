@@ -1152,7 +1152,20 @@ async fn serve_browse(
                 }
             })
             .collect();
-        entries.sort_by(|a, b| compare_entry_name(&a.name, &b.name));
+        // 依顯示名（磁碟代號 H:\…）排序；label 可能是 vol_<guid>
+        entries.sort_by(|a, b| {
+            let a_key = a
+                .display_name
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(a.name.as_str());
+            let b_key = b
+                .display_name
+                .as_deref()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(b.name.as_str());
+            compare_entry_name(a_key, b_key)
+        });
         let share_mounts = state
             .mounts
             .iter()

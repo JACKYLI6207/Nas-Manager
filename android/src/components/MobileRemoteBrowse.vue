@@ -303,7 +303,11 @@ const sortedEntries = computed(() => {
   const dir = nameSortAscending.value ? 1 : -1
   return [...entries].sort((a, b) => {
     if (a.isDir !== b.isDir) return a.isDir ? -1 : 1
-    const cmp = a.name.localeCompare(b.name, 'zh-Hant', { numeric: true, sensitivity: 'base' })
+    // 根目錄分享用 displayName（H:\…）；name 可能是 vol_<guid>，不可拿來排
+    const cmp = entryLabel(a).localeCompare(entryLabel(b), 'zh-Hant', {
+      numeric: true,
+      sensitivity: 'base',
+    })
     return cmp * dir
   })
 })
