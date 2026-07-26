@@ -11,6 +11,8 @@ struct UriResponse {
     #[serde(default)]
     uri: Option<String>,
     #[serde(default)]
+    uris: Vec<String>,
+    #[serde(default)]
     cancelled: bool,
 }
 
@@ -19,6 +21,24 @@ fn uri_pick_result(res: UriResponse) -> Option<String> {
         return None;
     }
     res.uri.filter(|s| !s.trim().is_empty())
+}
+
+fn uris_pick_result(res: UriResponse) -> Vec<String> {
+    if res.cancelled {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = res
+        .uris
+        .into_iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if out.is_empty() {
+        if let Some(u) = res.uri.filter(|s| !s.trim().is_empty()) {
+            out.push(u);
+        }
+    }
+    out
 }
 
 #[derive(Debug, Deserialize)]
@@ -530,6 +550,14 @@ impl<R: Runtime> FolderPicker<R> {
             .run_mobile_plugin::<UriResponse>("pickUploadDocument", ())
             .map_err(|e| crate::errors::CommandError::from("選擇上傳檔案失敗", e))?;
         Ok(uri_pick_result(res))
+    }
+
+    pub fn pick_upload_documents(&self) -> crate::errors::CommandResult<Vec<String>> {
+        let res = self
+            .handle()?
+            .run_mobile_plugin::<UriResponse>("pickUploadDocument", ())
+            .map_err(|e| crate::errors::CommandError::from("選擇上傳檔案失敗", e))?;
+        Ok(uris_pick_result(res))
     }
 
     pub fn pick_upload_folder(&self) -> crate::errors::CommandResult<Option<String>> {

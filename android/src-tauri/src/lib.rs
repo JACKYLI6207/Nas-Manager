@@ -75,6 +75,7 @@ pub fn run() {
             remote_pc_paste_with_progress,
             cancel_remote_pc_file_op,
             pick_remote_upload_file,
+            pick_remote_upload_files,
             pick_remote_upload_folder,
             plan_remote_pc_upload,
             upload_remote_pc_files,

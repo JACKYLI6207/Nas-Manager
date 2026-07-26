@@ -186,6 +186,21 @@ async fn pick_file_path(app: &AppHandle, filters: Option<Vec<(&str, &[&str])>>) 
     Ok(picked.map(|p| p.to_string()))
 }
 
+async fn pick_file_paths(app: &AppHandle) -> CommandResult<Vec<String>> {
+    let (tx, rx) = oneshot::channel();
+    app.dialog().file().pick_files(move |paths| {
+        let _ = tx.send(paths);
+    });
+    let picked = rx
+        .await
+        .map_err(|_| CommandError::from("選擇檔案失敗", anyhow::anyhow!("對話框已關閉")))?;
+    Ok(picked
+        .unwrap_or_default()
+        .into_iter()
+        .map(|p| p.to_string())
+        .collect())
+}
+
 async fn pick_folder_path(app: &AppHandle) -> CommandResult<Option<String>> {
     let (tx, rx) = oneshot::channel();
     app.dialog()
@@ -429,6 +444,12 @@ pub async fn play_remote_pc_video(
 #[specta::specta]
 pub async fn pick_remote_upload_file(app: AppHandle) -> CommandResult<Option<String>> {
     pick_file_path(&app, None).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn pick_remote_upload_files(app: AppHandle) -> CommandResult<Vec<String>> {
+    pick_file_paths(&app).await
 }
 
 #[tauri::command]

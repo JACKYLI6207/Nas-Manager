@@ -231,6 +231,24 @@ pub async fn pick_remote_upload_file(app: AppHandle) -> CommandResult<Option<Str
 
 #[tauri::command(async)]
 #[specta::specta]
+pub async fn pick_remote_upload_files(app: AppHandle) -> CommandResult<Vec<String>> {
+    #[cfg(target_os = "android")]
+    {
+        let picker = crate::folder_picker::folder_picker(&app)
+            .map_err(|e| CommandError::from("選擇上傳檔案失敗", anyhow::anyhow!("{}", e.err_message)))?;
+        return picker
+            .pick_upload_documents()
+            .map_err(|e| CommandError::from("選擇上傳檔案失敗", anyhow::anyhow!("{}", e.err_message)));
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Ok(Vec::new())
+    }
+}
+
+#[tauri::command(async)]
+#[specta::specta]
 pub async fn pick_remote_upload_folder(app: AppHandle) -> CommandResult<Option<String>> {
     #[cfg(target_os = "android")]
     {

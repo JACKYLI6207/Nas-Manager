@@ -584,6 +584,8 @@ function persistFavoriteState(next: FavoriteStreamStateBase) {
 }
 
 function runSortByName() {
+  opMenuOpen.value = false
+  layoutMenuOpen.value = false
   if (!canSortByName.value) return
   const ascending = nameSortAscending.value
   const selectedCatIds = new Set(selectedCategories.value.map((c) => c.id))
@@ -670,9 +672,6 @@ function runSortByName() {
             <button type="button" :disabled="!canMove" @click="runMove">移動</button>
             <button type="button" :disabled="!canMoveUp" @click="runReorder(-1)">上移</button>
             <button type="button" :disabled="!canMoveDown" @click="runReorder(1)">下移</button>
-            <button type="button" :disabled="!canSortByName" @click="runSortByName">
-              重新排序（{{ nameSortAscending ? '升序' : '降序' }}）
-            </button>
             <button type="button" :disabled="!canExpandCollapse" @click="runExpandSelected">全展開</button>
             <button type="button" :disabled="!canExpandCollapse" @click="runCollapseSelected">全收起</button>
             <button type="button" :disabled="transferBusy" @click="runExportFavorites">導出收藏</button>
@@ -683,26 +682,37 @@ function runSortByName() {
           </div>
         </div>
       </div>
-      <div class="sfp-menu-wrap">
+      <div class="sfp-toolbar-right">
         <button
           type="button"
           class="sfp-btn sfp-btn--ghost"
-          :aria-expanded="layoutMenuOpen"
-          @click.stop="toggleLayoutMenu"
+          :disabled="!canSortByName"
+          :title="canSortByName ? '依名稱重新排序所選項目' : '請至少勾選同層兩項'"
+          @click="runSortByName"
         >
-          顯示方式 ▾
+          {{ nameSortAscending ? '升序' : '降序' }}
         </button>
-        <div v-if="layoutMenuOpen" class="sfp-menu sfp-menu--right" @click.stop>
+        <div class="sfp-menu-wrap">
           <button
-            v-for="opt in STREAM_FAVORITE_LAYOUT_OPTIONS"
-            :key="opt.key"
             type="button"
-            class="sfp-menu-item"
-            :class="{ on: layout === opt.key }"
-            @click="chooseLayout(opt.key)"
+            class="sfp-btn sfp-btn--ghost"
+            :aria-expanded="layoutMenuOpen"
+            @click.stop="toggleLayoutMenu"
           >
-            {{ opt.label }}
+            顯示方式 ▾
           </button>
+          <div v-if="layoutMenuOpen" class="sfp-menu sfp-menu--right" @click.stop>
+            <button
+              v-for="opt in STREAM_FAVORITE_LAYOUT_OPTIONS"
+              :key="opt.key"
+              type="button"
+              class="sfp-menu-item"
+              :class="{ on: layout === opt.key }"
+              @click="chooseLayout(opt.key)"
+            >
+              {{ opt.label }}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -902,6 +912,15 @@ function runSortByName() {
   flex-shrink: 0;
   margin: 0 0 6px;
   padding: 0;
+  position: relative;
+  z-index: 30;
+}
+
+.sfp-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
 }
 
 .sfp-toolbar-left {
@@ -942,7 +961,7 @@ function runSortByName() {
   position: absolute;
   left: 0;
   top: calc(100% + 6px);
-  z-index: 40;
+  z-index: 80;
   min-width: 148px;
   padding: 4px 0;
   border-radius: 6px;

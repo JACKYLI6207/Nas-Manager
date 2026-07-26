@@ -930,6 +930,7 @@ class FolderPickerPlugin(private val activity: Activity) : Plugin(activity) {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
             type = "*/*"
+            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true)
             addFlags(
                 Intent.FLAG_GRANT_READ_URI_PERMISSION or
                     Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
@@ -944,21 +945,36 @@ class FolderPickerPlugin(private val activity: Activity) : Plugin(activity) {
             resolvePickCancelledOnUi(invoke)
             return
         }
-        val uri = result.data?.data
-        if (uri == null) {
+        val uris = mutableListOf<Uri>()
+        val clip = result.data?.clipData
+        if (clip != null && clip.itemCount > 0) {
+            for (i in 0 until clip.itemCount) {
+                clip.getItemAt(i)?.uri?.let { uris.add(it) }
+            }
+        } else {
+            result.data?.data?.let { uris.add(it) }
+        }
+        if (uris.isEmpty()) {
             rejectOnUi(invoke, "未取得檔案 URI")
             return
         }
-        try {
-            activity.contentResolver.takePersistableUriPermission(
-                uri,
-                Intent.FLAG_GRANT_READ_URI_PERMISSION
-            )
-        } catch (_: SecurityException) {
+        for (uri in uris) {
+            try {
+                activity.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            } catch (_: SecurityException) {
+            }
         }
         val ret = JSObject()
-        ret.put("uri", uri.toString())
-        val name = DocumentFile.fromSingleUri(activity, uri)?.name
+        ret.put("uri", uris[0].toString())
+        val uriArr = JSArray()
+        for (uri in uris) {
+            uriArr.put(uri.toString())
+        }
+        ret.put("uris", uriArr)
+        val name = DocumentFile.fromSingleUri(activity, uris[0])?.name
         if (!name.isNullOrBlank()) {
             ret.put("name", name)
         }

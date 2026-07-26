@@ -337,6 +337,11 @@ export function pickRemoteUploadFile() {
   return invoke<string | null>('pick_remote_upload_file')
 }
 
+/** 多選檔案（可與資料夾分開多次加入後一併上傳） */
+export function pickRemoteUploadFiles() {
+  return invoke<string[]>('pick_remote_upload_files')
+}
+
 export function pickRemoteUploadFolder() {
   return invoke<string | null>('pick_remote_upload_folder')
 }

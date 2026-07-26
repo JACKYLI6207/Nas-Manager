@@ -7,6 +7,7 @@ import {
   listRemotePcFiles,
   pickRemoteTransferDestination,
   pickRemoteUploadFile,
+  pickRemoteUploadFiles,
   pickRemoteUploadFolder,
   planRemotePcUpload,
   remotePcFileOp,
@@ -50,6 +51,7 @@ import {
 } from '../remoteBrowseLayout'
 import { clearRemoteBrowseCoverIndexCache } from '../remoteBrowseCover'
 import { clearThumbCacheForHost, isComicZipFileName, isVideoFileName } from '../remoteBrowseMedia'
+import { favoriteLookupRevision, isRemotePathFavorited } from '../streamFavoriteLookup'
 import { migrateStreamFavoritesMountPaths } from '../migrateFavoriteMountPaths'
 import { comicFavoriteAdapter } from '../comicStreamPlaylistStorage'
 import { videoFavoriteAdapter } from '../streamPlaylistStorage'
@@ -86,6 +88,14 @@ const renameDialogInput = ref('')
 const renameDialogPath = ref('')
 const renameDialogIsDir = ref(false)
 const renameInputRef = ref<HTMLInputElement | null>(null)
+/** 複選重新命名佇列（當前之後尚待處理） */
+const renameQueue = ref<string[]>([])
+const renameQueueTotal = ref(0)
+const renameQueueIndex = ref(0)
+type UploadSourceItem = { uri: string; kind: 'file' | 'folder'; label: string }
+const uploadPickerOpen = ref(false)
+const uploadSources = ref<UploadSourceItem[]>([])
+const uploadPickerBusy = ref(false)
 const mkdirDialogOpen = ref(false)
 const mkdirDialogInput = ref('')
 const mkdirInputRef = ref<HTMLInputElement | null>(null)
@@ -278,6 +288,21 @@ const isBrowseRoot = computed(() => !(browse.value?.path ?? '').trim())
 
 function entryLabel(entry: RemotePcDirEntry): string {
   return entry.displayName?.trim() || entry.name
+}
+
+function entryIsFavorited(entry: RemotePcDirEntry): boolean {
+  void favoriteLookupRevision()
+  if (!host.value) return false
+  // 僅標示漫畫／影片相關項目（含可串流資料夾）
+  const comicOrVideo =
+    entry.isDir || isVideoFileName(entry.name) || isComicZipFileName(entry.name)
+  if (!comicOrVideo) return false
+  return isRemotePathFavorited(
+    host.value,
+    props.pc.port,
+    entryPath(entry),
+    displayPcName.value || props.pc.name,
+  )
 }
 
 function isLegacyShareRootListing(result: RemotePcBrowseResult | null): boolean {
@@ -787,32 +812,116 @@ function cancelUploadConflict() {
   pendingUploadConflictResolve = null
 }
 
-async function startUpload(kind: 'file' | 'folder') {
+function sourceLabelFromUri(uri: string, kind: 'file' | 'folder'): string {
+  const norm = uri.replace(/\\/g, '/')
+  const base = norm.split('/').filter(Boolean).pop() || uri
+  try {
+    return decodeURIComponent(base)
+  } catch {
+    return base
+  }
+}
+
+function openUploadPicker() {
   transferMenuOpen.value = false
   streamMenuOpen.value = false
   opMenuOpen.value = false
   if (!host.value || remoteBusy.value) return
+  uploadSources.value = []
+  uploadPickerOpen.value = true
+}
+
+function closeUploadPicker() {
+  if (uploadPickerBusy.value) return
+  uploadPickerOpen.value = false
+  uploadSources.value = []
+}
+
+function removeUploadSource(idx: number) {
+  uploadSources.value = uploadSources.value.filter((_, i) => i !== idx)
+}
+
+async function addUploadFiles() {
+  if (uploadPickerBusy.value) return
+  uploadPickerBusy.value = true
   try {
-    const sourceUri =
-      kind === 'file' ? await pickRemoteUploadFile() : await pickRemoteUploadFolder()
-    if (!sourceUri) return
-    const plan = await planRemotePcUpload(
-      host.value,
-      props.pc.port,
-      currentPath.value,
-      sourceUri,
-      kind,
-    )
-    if (plan.files.length === 0) return
+    const uris = await pickRemoteUploadFiles()
+    if (!uris?.length) return
+    const existing = new Set(uploadSources.value.map((s) => s.uri))
+    const next = [...uploadSources.value]
+    for (const uri of uris) {
+      if (!uri || existing.has(uri)) continue
+      existing.add(uri)
+      next.push({ uri, kind: 'file', label: sourceLabelFromUri(uri, 'file') })
+    }
+    uploadSources.value = next
+  } catch (e) {
+    showFlashHint(formatInvokeError(e), 2800)
+  } finally {
+    uploadPickerBusy.value = false
+  }
+}
+
+async function addUploadFolder() {
+  if (uploadPickerBusy.value) return
+  uploadPickerBusy.value = true
+  try {
+    const uri = await pickRemoteUploadFolder()
+    if (!uri) return
+    if (uploadSources.value.some((s) => s.uri === uri)) {
+      showFlashHint('此資料夾已在清單中')
+      return
+    }
+    uploadSources.value = [
+      ...uploadSources.value,
+      { uri, kind: 'folder', label: sourceLabelFromUri(uri, 'folder') },
+    ]
+  } catch (e) {
+    showFlashHint(formatInvokeError(e), 2800)
+  } finally {
+    uploadPickerBusy.value = false
+  }
+}
+
+async function confirmUploadPicker() {
+  if (!host.value || remoteBusy.value || uploadPickerBusy.value) return
+  if (uploadSources.value.length === 0) {
+    showFlashHint('請先加入檔案或資料夾')
+    return
+  }
+  const sources = [...uploadSources.value]
+  uploadPickerOpen.value = false
+  uploadSources.value = []
+  try {
+    const allFiles: Awaited<ReturnType<typeof planRemotePcUpload>>['files'] = []
+    const conflictSet = new Set<string>()
+    for (const src of sources) {
+      const plan = await planRemotePcUpload(
+        host.value,
+        props.pc.port,
+        currentPath.value,
+        src.uri,
+        src.kind,
+      )
+      allFiles.push(...plan.files)
+      for (const c of plan.conflicts) conflictSet.add(c)
+    }
+    if (allFiles.length === 0) {
+      showFlashHint('沒有可上傳的檔案')
+      return
+    }
     let policy: RemoteUploadConflictPolicy = 'overwrite'
-    if (plan.conflicts.length > 0) {
-      const chosen = await askUploadConflict(plan.conflicts)
+    const conflicts = [...conflictSet]
+    if (conflicts.length > 0) {
+      const chosen = await askUploadConflict(conflicts)
       if (!chosen) return
       policy = chosen
     }
     remoteBusy.value = true
     transferDebugLog.value = []
-    appendTransferLog(`開始上傳 → PC ${host.value}:${props.pc.port}（${pathLabel.value}）`)
+    appendTransferLog(
+      `開始上傳 ${sources.length} 個來源 → PC ${host.value}:${props.pc.port}（${pathLabel.value}）`,
+    )
     startOverlayElapsedTimer()
     transferProgress.value = {
       phase: 'uploading',
@@ -825,7 +934,7 @@ async function startUpload(kind: 'file' | 'folder') {
       finished: false,
       error: null,
     }
-    await uploadRemotePcFiles(host.value, props.pc.port, plan.files, policy)
+    await uploadRemotePcFiles(host.value, props.pc.port, allFiles, policy)
     void loadDirectory(currentPath.value)
   } catch (e) {
     const errText = formatInvokeError(e)
@@ -988,11 +1097,11 @@ async function runFileOp(action: RemotePcFileOpAction) {
   const paths = Array.from(selectedItems.value.keys())
 
   if (action === 'rename') {
-    if (paths.length !== 1) {
-      showFlashHint('重新命名請只選一項')
+    if (paths.length === 0) {
+      showFlashHint('請先勾選要重新命名的項目')
       return
     }
-    openRenameDialog(paths[0]!)
+    startRenameQueue(paths)
     return
   }
 
@@ -1058,9 +1167,45 @@ function openRenameDialog(relPath: string) {
   })
 }
 
+function startRenameQueue(paths: string[]) {
+  renameQueue.value = [...paths]
+  renameQueueTotal.value = paths.length
+  renameQueueIndex.value = 0
+  const first = renameQueue.value.shift()
+  if (!first) return
+  renameQueueIndex.value = 1
+  openRenameDialog(first)
+}
+
+function advanceRenameQueue() {
+  const next = renameQueue.value.shift()
+  if (!next) {
+    renameDialogOpen.value = false
+    renameDialogPath.value = ''
+    renameQueueTotal.value = 0
+    renameQueueIndex.value = 0
+    selectedItems.value = new Map()
+    void loadDirectory(currentPath.value)
+    return
+  }
+  renameQueueIndex.value += 1
+  openRenameDialog(next)
+}
+
 function cancelRenameDialog() {
+  // 取消目前這一個，後續繼續
   renameDialogOpen.value = false
   renameDialogPath.value = ''
+  advanceRenameQueue()
+}
+
+function abortAllRenameDialog() {
+  renameQueue.value = []
+  renameDialogOpen.value = false
+  renameDialogPath.value = ''
+  renameQueueTotal.value = 0
+  renameQueueIndex.value = 0
+  showFlashHint('已全部終止命名')
 }
 
 function openMkdirDialog() {
@@ -1161,6 +1306,7 @@ async function confirmRenameDialog() {
     showFlashHint('名稱不可為空')
     return
   }
+  const current = renameDialogPath.value
   renameDialogOpen.value = false
   remoteBusy.value = true
   try {
@@ -1168,18 +1314,21 @@ async function confirmRenameDialog() {
       host.value,
       props.pc.port,
       'rename',
-      [renameDialogPath.value],
+      [current],
       currentPath.value,
       finalName,
     )
-    selectedItems.value = new Map()
+    selectedItems.value.delete(current)
     await loadDirectory(currentPath.value)
     showFlashHint(result.message)
-  } catch (e) {
-    showFlashHint(formatInvokeError(e), 2800)
-  } finally {
     remoteBusy.value = false
     renameDialogPath.value = ''
+    advanceRenameQueue()
+  } catch (e) {
+    showFlashHint(formatInvokeError(e), 2800)
+    remoteBusy.value = false
+    // 失敗時重開目前項目，讓使用者可改名重試或取消／全部終止
+    openRenameDialog(current)
   }
 }
 
@@ -1289,7 +1438,7 @@ watch(
               </button>
               <button
                 type="button"
-                :disabled="remoteBusy || selectedCount !== 1"
+                :disabled="remoteBusy || selectedCount === 0"
                 @click="runFileOp('rename')"
               >
                 重新命名
@@ -1339,8 +1488,7 @@ watch(
               傳輸 ▾
             </button>
             <div v-if="transferMenuOpen" class="remote-upload-menu" @click.stop>
-              <button type="button" @click="startUpload('file')">上傳檔案</button>
-              <button type="button" @click="startUpload('folder')">上傳資料夾</button>
+              <button type="button" :disabled="remoteBusy" @click="openUploadPicker">上傳</button>
               <button type="button" :disabled="selectedCount === 0" @click="startDownload">
                 下載{{ selectedCount > 0 ? ` (${selectedCount})` : '' }}
               </button>
@@ -1391,7 +1539,12 @@ watch(
               <span class="remote-browse-icon">{{
                 entry.isDir ? '📁' : isVideoFile(entry.name) ? '🎬' : '📄'
               }}</span>
-              <span class="remote-browse-name">{{ entryLabel(entry) }}</span>
+              <span class="remote-browse-name"
+                >{{ entryLabel(entry)
+                }}<span v-if="entryIsFavorited(entry)" class="remote-browse-fav-star" title="已在串流收藏"
+                  >★</span
+                ></span
+              >
               <div v-if="entryHasDiskCapacity(entry)" class="remote-browse-disk-cap">
                 <div class="remote-browse-disk-cap-inner">
                   <div class="remote-browse-disk-bar" aria-hidden="true">
@@ -1439,6 +1592,13 @@ watch(
           >
             <span class="remote-browse-check">{{ isSelected(entry) ? '☑' : '☐' }}</span>
           </button>
+          <span
+            v-if="entryIsFavorited(entry)"
+            class="remote-browse-grid-fav-star"
+            title="已在串流收藏"
+            aria-hidden="true"
+            >★</span
+          >
           <button
             type="button"
             class="remote-browse-grid-main"
@@ -1596,8 +1756,15 @@ watch(
 
     <div v-if="renameDialogOpen" class="remote-upload-conflict-overlay" @click.self="cancelRenameDialog">
       <div class="remote-upload-conflict-panel remote-rename-panel" @click.stop>
-        <p class="remote-upload-conflict-title">重新命名</p>
-        <p class="remote-upload-conflict-hint">未輸入副檔名時將保留原名副檔名（例：`12345.zip` → `123` 會變成 `123.zip`）</p>
+        <p class="remote-upload-conflict-title">
+          重新命名
+          <span v-if="renameQueueTotal > 1" class="remote-rename-progress"
+            >（{{ renameQueueIndex }} / {{ renameQueueTotal }}）</span
+          >
+        </p>
+        <p class="remote-upload-conflict-hint">
+          未輸入副檔名時將保留原名副檔名（例：`12345.zip` → `123` 會變成 `123.zip`）。「取消」略過目前這項；「全部終止命名」結束後續。
+        </p>
         <input
           ref="renameInputRef"
           v-model="renameDialogInput"
@@ -1607,9 +1774,55 @@ watch(
           autocomplete="off"
           @keydown.enter.prevent="confirmRenameDialog"
         />
-        <div class="remote-upload-conflict-actions">
+        <div class="remote-upload-conflict-actions remote-rename-actions">
           <button type="button" class="tool tool--primary" @click="confirmRenameDialog">確認</button>
           <button type="button" class="tool tool--ghost" @click="cancelRenameDialog">取消</button>
+          <button
+            v-if="renameQueueTotal > 1 || renameQueue.length > 0"
+            type="button"
+            class="tool tool--ghost"
+            @click="abortAllRenameDialog"
+          >
+            全部終止命名
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <div v-if="uploadPickerOpen" class="remote-upload-conflict-overlay" @click.self="closeUploadPicker">
+      <div class="remote-upload-conflict-panel remote-upload-picker-panel" @click.stop>
+        <p class="remote-upload-conflict-title">上傳</p>
+        <p class="remote-upload-conflict-hint">可多次加入檔案與資料夾，再一起上傳到目前目錄。</p>
+        <div class="remote-upload-picker-actions">
+          <button type="button" class="tool tool--ghost" :disabled="uploadPickerBusy" @click="addUploadFiles">
+            加入檔案
+          </button>
+          <button type="button" class="tool tool--ghost" :disabled="uploadPickerBusy" @click="addUploadFolder">
+            加入資料夾
+          </button>
+        </div>
+        <ul v-if="uploadSources.length" class="remote-upload-source-list">
+          <li v-for="(src, idx) in uploadSources" :key="src.uri + src.kind" class="remote-upload-source-item">
+            <span class="remote-upload-source-kind">{{ src.kind === 'folder' ? '資料夾' : '檔案' }}</span>
+            <span class="remote-upload-source-name" :title="src.uri">{{ src.label }}</span>
+            <button type="button" class="tool tool--ghost remote-upload-source-remove" @click="removeUploadSource(idx)">
+              移除
+            </button>
+          </li>
+        </ul>
+        <p v-else class="remote-upload-conflict-hint">尚未加入來源</p>
+        <div class="remote-upload-conflict-actions">
+          <button
+            type="button"
+            class="tool tool--primary"
+            :disabled="uploadPickerBusy || uploadSources.length === 0"
+            @click="confirmUploadPicker"
+          >
+            開始上傳{{ uploadSources.length ? ` (${uploadSources.length})` : '' }}
+          </button>
+          <button type="button" class="tool tool--ghost" :disabled="uploadPickerBusy" @click="closeUploadPicker">
+            取消
+          </button>
         </div>
       </div>
     </div>
@@ -1709,7 +1922,8 @@ watch(
   padding-bottom: 10px;
   background: var(--gm-page-bg, #1a1a1a);
   border-bottom: 1px solid var(--gm-border, rgba(255, 255, 255, 0.1));
-  z-index: 2;
+  position: relative;
+  z-index: 30;
 }
 
 .remote-browse-body {
@@ -1772,7 +1986,7 @@ watch(
   position: absolute;
   right: 0;
   top: calc(100% + 6px);
-  z-index: 40;
+  z-index: 80;
   min-width: 140px;
   padding: 6px;
   border-radius: 8px;
@@ -1914,6 +2128,8 @@ watch(
 
 /* bottom-dock flex 內，緊貼 nav.bottom-tabs（零空隙） */
 .remote-browse-foot--dock {
+  position: relative;
+  z-index: 30;
   flex-shrink: 0;
   width: 100%;
   display: flex;
@@ -1969,7 +2185,7 @@ watch(
   position: absolute;
   right: 0;
   bottom: calc(100% + 6px);
-  z-index: 50;
+  z-index: 80;
   min-width: 132px;
   padding: 4px 0;
   border-radius: 6px;
@@ -2396,5 +2612,85 @@ watch(
 .remote-transfer-cancel {
   width: 100%;
   margin-top: 8px;
+}
+
+.remote-browse-fav-star {
+  margin-left: 4px;
+  color: #ffd54a;
+  font-size: 0.95em;
+  vertical-align: baseline;
+}
+
+.remote-browse-grid-fav-star {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  z-index: 3;
+  color: #ffd54a;
+  font-size: 16px;
+  line-height: 1;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.85);
+  pointer-events: none;
+}
+
+.remote-rename-progress {
+  font-weight: 400;
+  opacity: 0.75;
+  font-size: 13px;
+}
+
+.remote-rename-actions {
+  flex-wrap: wrap;
+}
+
+.remote-upload-picker-panel {
+  max-width: min(440px, 94vw);
+}
+
+.remote-upload-picker-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.remote-upload-source-list {
+  list-style: none;
+  margin: 0 0 12px;
+  padding: 0;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.remote-upload-source-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.remote-upload-source-kind {
+  flex-shrink: 0;
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.remote-upload-source-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.remote-upload-source-remove {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 12px;
 }
 </style>
