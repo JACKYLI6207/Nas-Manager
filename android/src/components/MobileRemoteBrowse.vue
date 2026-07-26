@@ -83,6 +83,10 @@ const remoteBusy = ref(false)
 const transferMenuOpen = ref(false)
 const streamMenuOpen = ref(false)
 const opMenuOpen = ref(false)
+const opMenuBtnRef = ref<HTMLElement | null>(null)
+const transferMenuBtnRef = ref<HTMLElement | null>(null)
+const opMenuFloatStyle = ref<Record<string, string>>({})
+const transferMenuFloatStyle = ref<Record<string, string>>({})
 const renameDialogOpen = ref(false)
 const renameDialogInput = ref('')
 const renameDialogPath = ref('')
@@ -347,6 +351,57 @@ function toggleLayoutMenu() {
 
 function closeLayoutMenu() {
   layoutMenuOpen.value = false
+}
+
+function placeMenuBelow(
+  el: HTMLElement | null,
+  styleRef: { value: Record<string, string> },
+  align: 'left' | 'right',
+) {
+  if (!el) return
+  const r = el.getBoundingClientRect()
+  const top = `${Math.round(r.bottom + 6)}px`
+  if (align === 'right') {
+    styleRef.value = {
+      position: 'fixed',
+      top,
+      left: 'auto',
+      right: `${Math.max(8, Math.round(window.innerWidth - r.right))}px`,
+      zIndex: '10000',
+    }
+  } else {
+    styleRef.value = {
+      position: 'fixed',
+      top,
+      left: `${Math.max(8, Math.round(r.left))}px`,
+      right: 'auto',
+      zIndex: '10000',
+    }
+  }
+}
+
+function toggleOpMenu() {
+  const next = !opMenuOpen.value
+  closeActionMenus()
+  opMenuOpen.value = next
+  if (next) {
+    void nextTick(() => placeMenuBelow(opMenuBtnRef.value, opMenuFloatStyle, 'left'))
+  }
+}
+
+function toggleTransferMenu() {
+  const next = !transferMenuOpen.value
+  closeActionMenus()
+  transferMenuOpen.value = next
+  if (next) {
+    void nextTick(() => placeMenuBelow(transferMenuBtnRef.value, transferMenuFloatStyle, 'right'))
+  }
+}
+
+function onDocumentClickForActionMenus() {
+  if (opMenuOpen.value || transferMenuOpen.value) {
+    closeActionMenus()
+  }
 }
 
 function chooseBrowseLayout(layout: RemoteBrowseLayout) {
@@ -1335,6 +1390,7 @@ async function confirmRenameDialog() {
 onMounted(async () => {
   unregisterBack = registerAndroidBackHandler(handleAndroidBack)
   document.addEventListener('click', onDocumentClickForLayoutMenu)
+  document.addEventListener('click', onDocumentClickForActionMenus)
   void loadDirectory('')
   unlistenTransfer = await listen<RemoteTransferProgressEvent>(
     'remote-transfer-progress-event',
@@ -1359,6 +1415,7 @@ onBeforeUnmount(() => {
   unregisterBack?.()
   unregisterBack = null
   document.removeEventListener('click', onDocumentClickForLayoutMenu)
+  document.removeEventListener('click', onDocumentClickForActionMenus)
   unlistenTransfer?.()
   stopOverlayElapsedTimer()
   if (flashHintTimer != null) {
@@ -1398,70 +1455,15 @@ watch(
           </button>
           <div class="remote-upload-menu-wrap">
             <button
+              ref="opMenuBtnRef"
               type="button"
               class="tool tool--ghost remote-browse-op"
               :disabled="remoteBusy"
-              @click.stop="
-                () => {
-                  const next = !opMenuOpen
-                  closeActionMenus()
-                  opMenuOpen = next
-                }
-              "
+              @click.stop="toggleOpMenu"
             >
               操作 ▾
             </button>
-            <div v-if="opMenuOpen" class="remote-upload-menu remote-op-menu" @click.stop>
-              <button
-                type="button"
-                :disabled="remoteBusy || selectedCount === 0"
-                @click="runFileOp('cut')"
-              >
-                剪下
-              </button>
-              <button
-                type="button"
-                :disabled="remoteBusy || selectedCount === 0"
-                @click="runFileOp('copy')"
-              >
-                複製
-              </button>
-              <button type="button" :disabled="remoteBusy" @click="runFileOp('paste')">
-                貼上
-              </button>
-              <button
-                type="button"
-                :disabled="remoteBusy || selectedCount === 0"
-                @click="runFileOp('delete')"
-              >
-                刪除
-              </button>
-              <button
-                type="button"
-                :disabled="remoteBusy || selectedCount === 0"
-                @click="runFileOp('rename')"
-              >
-                重新命名
-              </button>
-              <button type="button" :disabled="remoteBusy" @click="runFileOp('mkdir')">
-                新建資料夾
-              </button>
-              <button
-                type="button"
-                :disabled="remoteBusy || selectedCount === 0"
-                @click="startFavoriteComic"
-              >
-                收藏此漫畫
-              </button>
-              <button
-                type="button"
-                :disabled="remoteBusy || selectedCount === 0"
-                @click="startFavoriteVideo"
-              >
-                收藏此影片
-              </button>
-            </div>
-          </div>
+                      </div>
         </div>
         <div class="remote-browse-actions-right">
           <button
@@ -1474,25 +1476,14 @@ watch(
           </button>
           <div class="remote-upload-menu-wrap">
             <button
+              ref="transferMenuBtnRef"
               type="button"
               class="tool tool--ghost"
               :disabled="remoteBusy"
-              @click.stop="
-                () => {
-                  const next = !transferMenuOpen
-                  closeActionMenus()
-                  transferMenuOpen = next
-                }
-              "
+              @click.stop="toggleTransferMenu"
             >
               傳輸 ▾
             </button>
-            <div v-if="transferMenuOpen" class="remote-upload-menu" @click.stop>
-              <button type="button" :disabled="remoteBusy" @click="openUploadPicker">上傳</button>
-              <button type="button" :disabled="selectedCount === 0" @click="startDownload">
-                下載{{ selectedCount > 0 ? ` (${selectedCount})` : '' }}
-              </button>
-            </div>
           </div>
         </div>
       </div>
@@ -1640,6 +1631,77 @@ watch(
         </p>
       </div>
     </div>
+
+    
+    <Teleport to="body">
+<div
+        v-if="opMenuOpen"
+        class="remote-upload-menu remote-op-menu remote-upload-menu--float"
+        :style="opMenuFloatStyle"
+        @click.stop
+      >
+              <button
+                type="button"
+                :disabled="remoteBusy || selectedCount === 0"
+                @click="runFileOp('cut')"
+              >
+                剪下
+              </button>
+              <button
+                type="button"
+                :disabled="remoteBusy || selectedCount === 0"
+                @click="runFileOp('copy')"
+              >
+                複製
+              </button>
+              <button type="button" :disabled="remoteBusy" @click="runFileOp('paste')">
+                貼上
+              </button>
+              <button
+                type="button"
+                :disabled="remoteBusy || selectedCount === 0"
+                @click="runFileOp('delete')"
+              >
+                刪除
+              </button>
+              <button
+                type="button"
+                :disabled="remoteBusy || selectedCount === 0"
+                @click="runFileOp('rename')"
+              >
+                重新命名
+              </button>
+              <button type="button" :disabled="remoteBusy" @click="runFileOp('mkdir')">
+                新建資料夾
+              </button>
+              <button
+                type="button"
+                :disabled="remoteBusy || selectedCount === 0"
+                @click="startFavoriteComic"
+              >
+                收藏此漫畫
+              </button>
+              <button
+                type="button"
+                :disabled="remoteBusy || selectedCount === 0"
+                @click="startFavoriteVideo"
+              >
+                收藏此影片
+              </button>
+            </div>
+
+      <div
+        v-if="transferMenuOpen"
+        class="remote-upload-menu remote-upload-menu--float"
+        :style="transferMenuFloatStyle"
+        @click.stop
+      >
+        <button type="button" :disabled="remoteBusy" @click="openUploadPicker">上傳</button>
+        <button type="button" :disabled="selectedCount === 0" @click="startDownload">
+          下載{{ selectedCount > 0 ? ` (${selectedCount})` : '' }}
+        </button>
+      </div>
+    </Teleport>
 
     <Teleport to="#gm-remote-browse-foot-slot" :disabled="!dockFootEnabled">
       <div v-if="dockFootEnabled" class="remote-browse-foot remote-browse-foot--dock">
@@ -1980,6 +2042,14 @@ watch(
 
 .remote-upload-menu-wrap {
   position: relative;
+}
+
+.remote-upload-menu--float {
+  position: fixed;
+  z-index: 10000;
+  max-height: min(70vh, 480px);
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .remote-upload-menu {
