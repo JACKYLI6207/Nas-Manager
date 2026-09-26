@@ -12,6 +12,7 @@ import {
   planRemotePcUpload,
   remotePcFileOp,
   remotePcPasteWithProgress,
+  remotePcCrossPasteWithProgress,
   transferRemotePcFiles,
   uploadRemotePcFiles,
   type RemotePcFileOpAction,
@@ -51,8 +52,13 @@ import {
 } from '../remoteBrowseLayout'
 import { clearRemoteBrowseCoverIndexCache } from '../remoteBrowseCover'
 import { clearThumbCacheForHost, isComicZipFileName, isVideoFileName } from '../remoteBrowseMedia'
-import { favoriteLookupRevision, isRemotePathFavorited } from '../streamFavoriteLookup'
 import { migrateStreamFavoritesMountPaths } from '../migrateFavoriteMountPaths'
+import {
+  clearRemotePcClipboard,
+  isSameRemotePc,
+  loadRemotePcClipboard,
+  saveRemotePcClipboard,
+} from '../remotePcClipboardStorage'
 import { comicFavoriteAdapter } from '../comicStreamPlaylistStorage'
 import { videoFavoriteAdapter } from '../streamPlaylistStorage'
 import type {
@@ -126,6 +132,11 @@ const viewLayout = ref<RemoteBrowseLayout>(loadSavedRemoteBrowseLayout())
 const layoutMenuOpen = ref(false)
 const layoutDropdownRef = ref<HTMLElement | null>(null)
 let unlistenTransfer: (() => void) | null = null
+/** 跨 PC 貼上走傳輸取消旗標，非同機 server paste */
+const pasteCrossPc = ref(false)
+/** 避免同一筆診斷 LOG 被進度輪詢重複追加 */
+let lastTransferDiagLog = ''
+let lastTransferProgressMsg = ''
 
 function isVideoFile(name: string): boolean {
   return isVideoFileName(name)
@@ -142,6 +153,24 @@ const gridCols = computed(() => gridColsForRemoteBrowseLayout(viewLayout.value))
 function appendTransferLog(line: string) {
   const ts = new Date().toLocaleString('zh-TW', { hour12: false })
   transferDebugLog.value = [...transferDebugLog.value, `[${ts}] ${line}`]
+}
+
+/** PC 端累積 detailLog：只追加新增後綴，避免整段重貼或中間行丟失 */
+function appendPcDetailLogDelta(diagRaw: string) {
+  const diag = diagRaw.replace(/\r\n/g, '\n').trimEnd()
+  if (!diag || diag === lastTransferDiagLog) return
+  let added = diag
+  if (lastTransferDiagLog && diag.startsWith(lastTransferDiagLog)) {
+    added = diag.slice(lastTransferDiagLog.length).replace(/^\n+/, '')
+  } else if (lastTransferDiagLog && diag.includes('\n')) {
+    // 不相容前綴時整段當新內容（通常是任務剛起）
+    added = diag
+  }
+  lastTransferDiagLog = diag
+  for (const line of added.split('\n')) {
+    const t = line.trim()
+    if (t) appendTransferLog(t)
+  }
 }
 
 const transferErrorMessage = computed(() => {
@@ -294,21 +323,6 @@ function entryLabel(entry: RemotePcDirEntry): string {
   return entry.displayName?.trim() || entry.name
 }
 
-function entryIsFavorited(entry: RemotePcDirEntry): boolean {
-  void favoriteLookupRevision()
-  if (!host.value) return false
-  // 僅標示漫畫／影片相關項目（含可串流資料夾）
-  const comicOrVideo =
-    entry.isDir || isVideoFileName(entry.name) || isComicZipFileName(entry.name)
-  if (!comicOrVideo) return false
-  return isRemotePathFavorited(
-    host.value,
-    props.pc.port,
-    entryPath(entry),
-    displayPcName.value || props.pc.name,
-  )
-}
-
 function isLegacyShareRootListing(result: RemotePcBrowseResult | null): boolean {
   if (!result || result.path) return false
   return result.entries.some(
@@ -439,6 +453,17 @@ function formatSpeed(bps: number): string {
   if (bps < 1024 * 1024) return `${(bps / 1024).toFixed(1)} KB/s`
   return `${(bps / (1024 * 1024)).toFixed(1)} MB/s`
 }
+
+/** 即時速度；若 PC 回報 0 則用已傳位元組／用時估算 */
+const transferDisplaySpeedBps = computed(() => {
+  void transferElapsedTick.value
+  const p = transferProgress.value
+  if (!p || p.finished || p.bytesDone <= 0) return 0
+  if (p.speedBps > 0) return p.speedBps
+  if (!transferStartedAt.value) return 0
+  const sec = Math.max(1, (Date.now() - transferStartedAt.value) / 1000)
+  return Math.floor(p.bytesDone / sec)
+})
 
 /** 根目錄分享槽是否顯示磁碟容量（含進度條） */
 function entryHasDiskCapacity(entry: RemotePcDirEntry): boolean {
@@ -1090,6 +1115,12 @@ async function cancelActiveTransfer() {
   const isPaste =
     p.phase === 'pasting' || p.phase === 'preparing' || p.phase === 'scanning' || p.phase === 'cancelling'
   appendTransferLog(isPaste ? '使用者要求取消貼上…' : '使用者要求取消傳輸…')
+  transferProgress.value = {
+    ...p,
+    phase: 'cancelling',
+    message: isPaste ? '正在取消貼上…' : '正在取消傳輸…',
+    speedBps: 0,
+  }
   try {
     if (isPaste) {
       await cancelRemotePcFileOp()
@@ -1105,7 +1136,16 @@ async function startPaste() {
   if (!host.value || remoteBusy.value) return
   remoteBusy.value = true
   transferDebugLog.value = []
-  appendTransferLog(`開始貼上 → PC ${host.value}:${props.pc.port}（${pathLabel.value}）`)
+  lastTransferDiagLog = ''
+  lastTransferProgressMsg = ''
+  const clip = loadRemotePcClipboard()
+  const crossPc = clip != null && !isSameRemotePc(clip, host.value, props.pc.port)
+  pasteCrossPc.value = crossPc
+  appendTransferLog(
+    crossPc && clip
+      ? `開始跨 PC 貼上：${clip.sourceHost}:${clip.sourcePort} → ${host.value}:${props.pc.port}（${pathLabel.value}）`
+      : `開始貼上 → PC ${host.value}:${props.pc.port}（${pathLabel.value}）`,
+  )
   startOverlayElapsedTimer()
   transferProgress.value = {
     phase: 'preparing',
@@ -1119,7 +1159,23 @@ async function startPaste() {
     error: null,
   }
   try {
-    await remotePcPasteWithProgress(host.value, props.pc.port, currentPath.value)
+    if (crossPc && clip) {
+      await remotePcCrossPasteWithProgress(
+        clip.sourceHost,
+        clip.sourcePort,
+        clip.entries,
+        host.value,
+        props.pc.port,
+        currentPath.value,
+        clip.mode,
+      )
+      if (clip.mode === 'cut') clearRemotePcClipboard()
+    } else {
+      await remotePcPasteWithProgress(host.value, props.pc.port, currentPath.value)
+      if (clip?.mode === 'cut' && isSameRemotePc(clip, host.value, props.pc.port)) {
+        clearRemotePcClipboard()
+      }
+    }
     await loadDirectory(currentPath.value)
   } catch (e) {
     const errText = formatInvokeError(e)
@@ -1140,6 +1196,7 @@ async function startPaste() {
       stopOverlayElapsedTimer()
     }
   } finally {
+    pasteCrossPc.value = false
     remoteBusy.value = false
   }
 }
@@ -1195,6 +1252,18 @@ async function runFileOp(action: RemotePcFileOpAction) {
       currentPath.value,
       '',
     )
+    if (action === 'copy' || action === 'cut') {
+      saveRemotePcClipboard({
+        mode: action,
+        sourceHost: host.value,
+        sourcePort: props.pc.port,
+        entries: paths.map((path) => ({
+          path,
+          anchorPath: selectedItems.value.get(path) ?? currentPath.value,
+        })),
+        savedAt: Date.now(),
+      })
+    }
     if (action === 'cut' || action === 'delete_recycle' || action === 'delete_permanent') {
       selectedItems.value = new Map()
     }
@@ -1396,13 +1465,30 @@ onMounted(async () => {
     'remote-transfer-progress-event',
     (ev) => {
       transferProgress.value = ev.payload
+      const diag = ev.payload.detailLog?.trim()
+      if (diag) {
+        appendPcDetailLogDelta(diag)
+      }
+      const msg = ev.payload.message?.trim()
+      if (
+        msg &&
+        msg !== lastTransferProgressMsg &&
+        !ev.payload.finished &&
+        msg !== '準備貼上…' &&
+        msg !== '準備跨 PC 貼上…' &&
+        msg !== '正在計算大小…' &&
+        msg !== 'scanning size...'
+      ) {
+        lastTransferProgressMsg = msg
+        // 狀態列變化也寫進日誌，避免只有 detailLog 才有字
+        if (!diag || !diag.includes(msg)) {
+          appendTransferLog(`狀態：${msg}`)
+        }
+      }
       if (ev.payload.finished) {
         stopOverlayElapsedTimer()
         remoteBusy.value = false
         appendTransferLog(ev.payload.message)
-        if (ev.payload.detailLog) {
-          appendTransferLog(ev.payload.detailLog)
-        }
         if (ev.payload.error || ev.payload.phase === 'error') {
           console.error('[remote-transfer]', ev.payload)
         }
@@ -1530,12 +1616,7 @@ watch(
               <span class="remote-browse-icon">{{
                 entry.isDir ? '📁' : isVideoFile(entry.name) ? '🎬' : '📄'
               }}</span>
-              <span class="remote-browse-name"
-                >{{ entryLabel(entry)
-                }}<span v-if="entryIsFavorited(entry)" class="remote-browse-fav-star" title="已在串流收藏"
-                  >★</span
-                ></span
-              >
+              <span class="remote-browse-name">{{ entryLabel(entry) }}</span>
               <div v-if="entryHasDiskCapacity(entry)" class="remote-browse-disk-cap">
                 <div class="remote-browse-disk-cap-inner">
                   <div class="remote-browse-disk-bar" aria-hidden="true">
@@ -1583,13 +1664,6 @@ watch(
           >
             <span class="remote-browse-check">{{ isSelected(entry) ? '☑' : '☐' }}</span>
           </button>
-          <span
-            v-if="entryIsFavorited(entry)"
-            class="remote-browse-grid-fav-star"
-            title="已在串流收藏"
-            aria-hidden="true"
-            >★</span
-          >
           <button
             type="button"
             class="remote-browse-grid-main"
@@ -1919,7 +1993,7 @@ watch(
         </p>
         <p v-if="transferProgress.bytesTotal > 0" class="remote-transfer-detail">
           {{ formatSize(transferProgress.bytesDone) }} / {{ formatSize(transferProgress.bytesTotal) }}
-          <span v-if="transferProgress.speedBps > 0"> · {{ formatSpeed(transferProgress.speedBps) }}</span>
+          <span v-if="transferDisplaySpeedBps > 0"> · {{ formatSpeed(transferDisplaySpeedBps) }}</span>
         </p>
         <p v-if="transferStartedAt > 0" class="remote-transfer-detail">{{ transferElapsedText }}</p>
         <div
@@ -2682,25 +2756,6 @@ watch(
 .remote-transfer-cancel {
   width: 100%;
   margin-top: 8px;
-}
-
-.remote-browse-fav-star {
-  margin-left: 4px;
-  color: #ffd54a;
-  font-size: 0.95em;
-  vertical-align: baseline;
-}
-
-.remote-browse-grid-fav-star {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  z-index: 3;
-  color: #ffd54a;
-  font-size: 16px;
-  line-height: 1;
-  text-shadow: 0 0 2px rgba(0, 0, 0, 0.85);
-  pointer-events: none;
 }
 
 .remote-rename-progress {

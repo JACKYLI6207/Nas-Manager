@@ -11,11 +11,14 @@ mod logger;
 mod mobile_settings;
 mod pc_remote_discovery;
 mod remote_comic;
+mod cross_pc_paste;
 mod remote_management;
 mod remote_pc_file_op;
+mod remote_pc_cross_paste;
 mod remote_pc_transfer;
 mod remote_pc_upload;
 mod share_roots;
+mod xfer_source;
 mod types;
 mod utils;
 mod video_player_discovery;
@@ -75,6 +78,7 @@ pub fn run() {
             transfer_remote_pc_files,
             cancel_remote_pc_transfer,
             remote_pc_paste_with_progress,
+            remote_pc_cross_paste_with_progress,
             cancel_remote_pc_file_op,
             pick_remote_upload_file,
             pick_remote_upload_files,

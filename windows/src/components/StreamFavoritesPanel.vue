@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { exportTextToPickedFolder, pickAndReadJsonText } from '../api'
 import { formatInvokeError } from '../invokeError'
+import { pcMessage } from '../pcDialog'
 import {
   gridColsForStreamFavoriteLayout,
   isStreamFavoriteGridLayout,
@@ -62,6 +63,21 @@ const moveItemDialog = ref<{ open: boolean; jobs: { playlistId: string; job: Rem
 const movePlaylistDialog = ref<{ open: boolean; playlistIds: string[] }>({
   open: false,
   playlistIds: [],
+})
+const deleteDialog = ref({ open: false, message: '' })
+type PromptMode = 'addCategory' | 'renameCategory' | 'renamePlaylist'
+const promptDialog = ref<{
+  open: boolean
+  title: string
+  value: string
+  mode: PromptMode
+  targetId: string
+}>({
+  open: false,
+  title: '',
+  value: '',
+  mode: 'addCategory',
+  targetId: '',
 })
 
 const coverKind = computed(() => props.media)
@@ -333,9 +349,13 @@ function chooseLayout(next: StreamFavoriteLayout) {
 
 function runAddCategory() {
   opMenuOpen.value = false
-  const name = window.prompt('新增主分類名稱')
-  if (name === null || !name.trim()) return
-  state.value = props.adapter.addCategory(name)
+  promptDialog.value = {
+    open: true,
+    title: '新增主分類名稱',
+    value: '',
+    mode: 'addCategory',
+    targetId: '',
+  }
 }
 
 async function runExportFavorites() {
@@ -347,9 +367,9 @@ async function runExportFavorites() {
     const content = buildStreamFavoriteExportJson(props.media, props.adapter.loadState())
     const uri = await exportTextToPickedFolder(fileName, content)
     if (!uri) return
-    window.alert(`已導出收藏\n${fileName}`)
+    await pcMessage(`已導出收藏\n${fileName}`)
   } catch (e) {
-    window.alert(formatInvokeError(e))
+    await pcMessage(formatInvokeError(e))
   } finally {
     transferBusy.value = false
   }
@@ -366,9 +386,9 @@ async function runImportFavorites() {
     state.value = props.adapter.replaceState(imported as FavoriteStreamStateBase)
     selectedKeys.value = new Set()
     reload()
-    window.alert('已導入並覆蓋現有收藏')
+    await pcMessage('已導入並覆蓋現有收藏')
   } catch (e) {
-    window.alert(formatInvokeError(e))
+    await pcMessage(formatInvokeError(e))
   } finally {
     transferBusy.value = false
   }
@@ -402,16 +422,24 @@ function runRename() {
   if (!canRename.value) return
   if (intentCategories.value.length === 1) {
     const cat = intentCategories.value[0]!
-    const name = window.prompt('重新命名主分類', cat.name)
-    if (name === null) return
-    state.value = props.adapter.renameCategory(cat.id, name)
+    promptDialog.value = {
+      open: true,
+      title: '重新命名主分類',
+      value: cat.name,
+      mode: 'renameCategory',
+      targetId: cat.id,
+    }
     return
   }
   if (intentPlaylists.value.length === 1) {
     const pl = intentPlaylists.value[0]!
-    const name = window.prompt('重新命名收藏', pl.name)
-    if (name === null) return
-    state.value = props.adapter.renamePlaylist(pl.id, name)
+    promptDialog.value = {
+      open: true,
+      title: '重新命名收藏',
+      value: pl.name,
+      mode: 'renamePlaylist',
+      targetId: pl.id,
+    }
   }
 }
 
@@ -422,8 +450,15 @@ function runDelete() {
   if (selectedCategories.value.length) parts.push(`${selectedCategories.value.length} 個主分類`)
   if (selectedPlaylists.value.length) parts.push(`${selectedPlaylists.value.length} 個收藏`)
   if (selectedItems.value.length) parts.push(`${selectedItems.value.length} 個項目`)
-  if (!window.confirm(`確定刪除：${parts.join('、')}？`)) return
+  deleteDialog.value = { open: true, message: `確定刪除：${parts.join('、')}？` }
+}
 
+function cancelDeleteDialog() {
+  deleteDialog.value.open = false
+}
+
+function confirmDeleteDialog() {
+  deleteDialog.value.open = false
   // 先刪項目／收藏，再刪主分類（主分類刪除會把收藏移入未分類）
   for (const { playlistId, job } of selectedItems.value) {
     state.value = props.adapter.removePlaylistItem(playlistId, job)
@@ -435,11 +470,35 @@ function runDelete() {
     try {
       state.value = props.adapter.removeCategory(cat.id)
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : String(e))
+      void pcMessage(e instanceof Error ? e.message : String(e))
     }
   }
   selectedKeys.value = new Set()
   reload()
+}
+
+function cancelPromptDialog() {
+  promptDialog.value.open = false
+}
+
+function confirmPromptDialog() {
+  const { mode, value, targetId } = promptDialog.value
+  const trimmed = value.trim()
+  promptDialog.value.open = false
+  if (mode === 'addCategory') {
+    if (!trimmed) return
+    state.value = props.adapter.addCategory(trimmed)
+    return
+  }
+  if (mode === 'renameCategory') {
+    if (!trimmed) return
+    state.value = props.adapter.renameCategory(targetId, trimmed)
+    return
+  }
+  if (mode === 'renamePlaylist') {
+    if (!trimmed) return
+    state.value = props.adapter.renamePlaylist(targetId, trimmed)
+  }
 }
 
 function runMove() {
@@ -669,7 +728,7 @@ function runSortByName() {
             <button type="button" :disabled="!canExpandCollapse" @click="runCollapseSelected">全收起</button>
             <button type="button" :disabled="transferBusy" @click="runExportFavorites">導出收藏</button>
             <button type="button" :disabled="transferBusy" @click="runImportFavorites">導入收藏</button>
-            <button type="button" class="sfp-menu-danger" :disabled="!canDelete" @click="runDelete">
+            <button type="button" class="sfp-menu-danger" :disabled="!canDelete" @click.stop="runDelete">
               刪除
             </button>
           </div>
@@ -882,6 +941,35 @@ function runSortByName() {
             <p v-if="!hasMovableTargets" class="sfp-move-empty">沒有其他收藏名稱可移動</p>
           </div>
           <button type="button" class="sfp-move-cancel" @click="closeMoveItemDialog">取消</button>
+        </div>
+      </div>
+
+      <div v-if="deleteDialog.open" class="sfp-move-overlay" @click.self="cancelDeleteDialog">
+        <div class="sfp-move-panel" @click.stop>
+          <p class="sfp-move-title">刪除確認</p>
+          <p class="sfp-prompt-text">{{ deleteDialog.message }}</p>
+          <div class="sfp-confirm-actions">
+            <button type="button" class="sfp-confirm-danger" @click="confirmDeleteDialog">刪除</button>
+            <button type="button" class="sfp-move-cancel" @click="cancelDeleteDialog">取消</button>
+          </div>
+        </div>
+      </div>
+
+      <div v-if="promptDialog.open" class="sfp-move-overlay" @click.self="cancelPromptDialog">
+        <div class="sfp-move-panel" @click.stop>
+          <p class="sfp-move-title">{{ promptDialog.title }}</p>
+          <input
+            v-model="promptDialog.value"
+            class="sfp-prompt-input"
+            type="text"
+            maxlength="80"
+            autocomplete="off"
+            @keydown.enter.prevent="confirmPromptDialog"
+          />
+          <div class="sfp-confirm-actions">
+            <button type="button" class="sfp-confirm-primary" @click="confirmPromptDialog">確認</button>
+            <button type="button" class="sfp-move-cancel" @click="cancelPromptDialog">取消</button>
+          </div>
         </div>
       </div>
     </Teleport>
@@ -1331,5 +1419,50 @@ function runSortByName() {
   border: 1px solid rgba(255, 255, 255, 0.2);
   background: transparent;
   color: inherit;
+}
+
+.sfp-prompt-text {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  opacity: 0.9;
+}
+
+.sfp-prompt-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 12px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font-size: 13px;
+}
+
+.sfp-confirm-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.sfp-confirm-danger {
+  width: 100%;
+  padding: 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 120, 120, 0.45);
+  background: rgba(180, 40, 40, 0.35);
+  color: #ffd0d0;
+  font-size: 13px;
+}
+
+.sfp-confirm-primary {
+  width: 100%;
+  padding: 9px;
+  border-radius: 8px;
+  border: 1px solid rgba(100, 160, 255, 0.45);
+  background: rgba(49, 130, 206, 0.35);
+  color: #d8ecff;
+  font-size: 13px;
 }
 </style>

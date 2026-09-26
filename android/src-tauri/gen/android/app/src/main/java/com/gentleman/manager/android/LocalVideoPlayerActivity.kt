@@ -7,8 +7,10 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.Base64
 import android.util.TypedValue
+import android.view.MotionEvent
 import android.view.SurfaceView
 import android.view.TextureView
 import android.view.View
@@ -59,6 +61,7 @@ import androidx.media3.ui.DefaultTrackNameProvider
 import androidx.media3.ui.PlayerControlView
 import androidx.media3.ui.PlayerView
 import androidx.media3.ui.SubtitleView
+import androidx.media3.ui.TimeBar
 import androidx.media3.ui.R as Media3UiR
 import androidx.media3.ui.TrackSelectionDialogBuilder
 import org.videolan.libvlc.util.VLCVideoLayout
@@ -108,6 +111,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
     private var isRemoteStreamPlayback = false
     private var simpToTradEnabled = false
     private val progressSaveHandler = Handler(Looper.getMainLooper())
+    private val seekRepeatHandler = Handler(Looper.getMainLooper())
+    private var lastVlcScrubSeekAtMs = 0L
     private var progressStorageKey: String = "unknown"
     private var subtitleTextSizeSp = DEFAULT_SUBTITLE_TEXT_SIZE_SP
     private var subtitlePgsScale = DEFAULT_PGS_SCALE
@@ -256,6 +261,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 .setTrackSelector(trackSelector)
                 .setBandwidthMeter(meter)
                 .setMediaSourceFactory(mediaSourceFactory)
+                .setSeekBackIncrementMs(SEEK_STEP_MS)
+                .setSeekForwardIncrementMs(SEEK_STEP_MS)
                 .build()
                 .also { player = it }
         exo.setWakeMode(C.WAKE_MODE_NETWORK)
@@ -594,7 +601,10 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 background = null
             }
             vlcVideoLayoutRef?.let { layout ->
-                pinchZoomHelper = VideoPinchZoomHelper(layout)
+                pinchZoomHelper =
+                    VideoPinchZoomHelper(layout) {
+                        setVlcChromeVisible(!uiChromeVisible)
+                    }
                 val (offsetX, offsetY) = VideoSubtitlePrefStore.loadSubtitleOffset(this@LocalVideoPlayerActivity)
                 vlcSubtitleDragHelper =
                     VlcSubtitleDragHelper(
@@ -623,12 +633,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                     setVlcChromeVisible(false)
                 }
             }
-            control.setOnTouchListener { _, event ->
-                if (vlcSubtitleDragHelper?.onTouchEvent(event, uiChromeVisible) == true) {
-                    return@setOnTouchListener true
-                }
-                false
-            }
+            control.setOnTouchListener(routeVlcTouch)
             touchTarget.isClickable = true
             touchTarget.setOnClickListener {
                 if (uiChromeVisible) {
@@ -638,6 +643,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                 }
             }
             touchTarget.setOnTouchListener(routeVlcTouch)
+            vlcTapCatcherRef?.setOnTouchListener(routeVlcTouch)
             control.findViewById<ImageButton>(Media3UiR.id.exo_settings)?.setOnClickListener {
                 showVideoSettingsMenu()
             }
@@ -645,6 +651,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             setupOrientationToggleButton(control)
             setupStreamPlaylistButton(control)
             setupPlaylistSkipButtons(control)
+            setupSeekRepeatButtons(control)
+            setupTimeBarLivePreview(control)
         }
     }
 
@@ -763,6 +771,14 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
         }
     }
 
+    private fun toggleExoPlayerChrome(playerView: PlayerView) {
+        if (playerView.isControllerFullyVisible) {
+            playerView.hideController()
+        } else {
+            playerView.showController()
+        }
+    }
+
     private fun setupPlayerViewInteractions(playerView: PlayerView) {
         playerView.post {
             playerView.findViewById<View>(Media3UiR.id.exo_controls_background)?.apply {
@@ -780,7 +796,10 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
                     contentFrame?.let { findVideoSurface(it) }
                 }
             if (zoomTarget != null) {
-                pinchZoomHelper = VideoPinchZoomHelper(zoomTarget)
+                pinchZoomHelper =
+                    VideoPinchZoomHelper(zoomTarget) {
+                        toggleExoPlayerChrome(playerView)
+                    }
             }
             if (subtitleView != null) {
                 val (offsetX, offsetY) = VideoSubtitlePrefStore.loadSubtitleOffset(this)
@@ -819,6 +838,8 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             setupOrientationToggleButton(playerView)
             setupStreamPlaylistButton(playerView)
             setupPlaylistSkipButtons(playerView)
+            setupSeekRepeatButtons(playerView)
+            setupTimeBarLivePreview(playerView)
             applySubtitleTextSize(subtitleTextSizeSp)
             updateEmbeddedSubtitleLayout()
         }
@@ -918,6 +939,91 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             }
         }
         refreshPlaylistSkipButtons(root)
+    }
+
+    private fun setupSeekRepeatButtons(root: View) {
+        installSeekRepeat(
+            findSeekButton(root, Media3UiR.id.exo_rew_with_amount, Media3UiR.id.exo_rew),
+            forward = false,
+        )
+        installSeekRepeat(
+            findSeekButton(root, Media3UiR.id.exo_ffwd_with_amount, Media3UiR.id.exo_ffwd),
+            forward = true,
+        )
+    }
+
+    private fun findSeekButton(root: View, vararg ids: Int): View? {
+        for (id in ids) {
+            root.findViewById<View>(id)?.let { return it }
+        }
+        return null
+    }
+
+    private fun installSeekRepeat(button: View?, forward: Boolean) {
+        if (button == null) return
+        val tick =
+            object : Runnable {
+                override fun run() {
+                    performSeekStep(forward)
+                    seekRepeatHandler.postDelayed(this, SEEK_REPEAT_INTERVAL_MS)
+                }
+            }
+        button.setOnLongClickListener {
+            performSeekStep(forward)
+            seekRepeatHandler.removeCallbacks(tick)
+            seekRepeatHandler.postDelayed(tick, SEEK_REPEAT_INTERVAL_MS)
+            true
+        }
+        button.setOnTouchListener { _, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                    seekRepeatHandler.removeCallbacks(tick)
+            }
+            false
+        }
+    }
+
+    private fun performSeekStep(forward: Boolean) {
+        val p = playlistPlayer ?: player ?: return
+        if (forward) {
+            p.seekForward()
+        } else {
+            p.seekBack()
+        }
+    }
+
+    private fun setupTimeBarLivePreview(root: View) {
+        val timeBar = root.findViewById<View>(Media3UiR.id.exo_progress) as? TimeBar ?: return
+        timeBar.addListener(
+            object : TimeBar.OnScrubListener {
+                override fun onScrubStart(timeBar: TimeBar, position: Long) {
+                    player?.setScrubbingModeEnabled(true)
+                    lastVlcScrubSeekAtMs = 0L
+                    previewSeekTo(position, force = true)
+                }
+
+                override fun onScrubMove(timeBar: TimeBar, position: Long) {
+                    previewSeekTo(position, force = false)
+                }
+
+                override fun onScrubStop(timeBar: TimeBar, position: Long, canceled: Boolean) {
+                    if (!canceled) {
+                        previewSeekTo(position, force = true)
+                    }
+                    player?.setScrubbingModeEnabled(false)
+                }
+            },
+        )
+    }
+
+    private fun previewSeekTo(positionMs: Long, force: Boolean) {
+        val target = playlistPlayer ?: player ?: return
+        if (!force && vlcSession != null) {
+            val now = SystemClock.uptimeMillis()
+            if (now - lastVlcScrubSeekAtMs < VLC_SCRUB_THROTTLE_MS) return
+            lastVlcScrubSeekAtMs = now
+        }
+        target.seekTo(positionMs)
     }
 
     private fun alignPlaylistCurrentFromPlayback() {
@@ -2556,6 +2662,7 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
             activeInstance = null
         }
         persistPlaybackProgress()
+        seekRepeatHandler.removeCallbacksAndMessages(null)
         resetWindowScreenBrightness()
         VideoPlaybackForegroundService.stop(this)
         stopProgressSaving()
@@ -2626,6 +2733,10 @@ class LocalVideoPlayerActivity : AppCompatActivity() {
 
     companion object {
         private var activeInstance: WeakReference<LocalVideoPlayerActivity>? = null
+
+        private const val SEEK_STEP_MS = 30_000L
+        private const val SEEK_REPEAT_INTERVAL_MS = 450L
+        private const val VLC_SCRUB_THROTTLE_MS = 250L
 
         const val ACTION_FORCE_STOP = "com.gentleman.manager.android.action.FORCE_STOP_PLAYBACK"
         const val EXTRA_RESUME_PLAY = "resume_play"

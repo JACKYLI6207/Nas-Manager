@@ -1,13 +1,15 @@
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use base64::Engine;
-use bytes::Bytes;
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::AppHandle;
 use tauri_specta::Event;
-use tokio::io::AsyncReadExt;
+use tokio_util::io::ReaderStream;
 
 use crate::extensions::AnyhowErrorToStringChain;
 use crate::pc_remote_discovery::{check_remote_upload_conflicts, ensure_pc_remote_api_v3};
@@ -17,6 +19,9 @@ use crate::remote_pc_transfer::{
     build_transfer_summary_log, emit_progress_active, remote_transfer_cancelled,
     reset_remote_transfer_cancel, RemoteTransferFailedItem, RemoteTransferProgressEvent,
 };
+
+/// 與 PC 上傳調教同級：大塊讀取，避免 64KB chunked 造成區網停停走走。
+const UPLOAD_READ_BUF: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -120,6 +125,7 @@ pub async fn upload_remote_pc_files(
     let picker = folder_picker(app).map_err(|e| anyhow::anyhow!("{}", e.err_message))?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(3600))
+        .tcp_nodelay(true)
         .build()
         .context("建立 HTTP 用戶端失敗")?;
 
@@ -178,9 +184,13 @@ pub async fn upload_remote_pc_files(
                 None,
             );
 
-            let cache_path = picker
-                .cache_document_to_file(&file.source_uri)
-                .map_err(|e| anyhow::anyhow!("{}", e.err_message))?;
+            let cache_path = if file.source_uri.starts_with("content://") {
+                picker
+                    .cache_document_to_file(&file.source_uri)
+                    .map_err(|e| anyhow::anyhow!("{}", e.err_message))?
+            } else {
+                file.source_uri.clone()
+            };
             let file_len = tokio::fs::metadata(&cache_path)
                 .await
                 .with_context(|| format!("讀取暫存檔大小失敗：{}", cache_path))?
@@ -188,92 +198,78 @@ pub async fn upload_remote_pc_files(
             let path_b64 = base64::engine::general_purpose::STANDARD
                 .encode(file.dest_relative_path.as_bytes());
 
-            struct UploadStreamState {
-                file: tokio::fs::File,
-                buf: Vec<u8>,
-                file_base: u64,
-                bytes_in_file: u64,
-                last_emit: Instant,
-                app: AppHandle,
-                file_index: u32,
-                file_count: u32,
-                bytes_total: u64,
-                upload_start: Instant,
-                dest_path: String,
-            }
-
             let file_handle = tokio::fs::File::open(&cache_path)
                 .await
                 .with_context(|| format!("開啟暫存檔失敗：{}", cache_path))?;
-            let stream_state = UploadStreamState {
-                file: file_handle,
-                buf: vec![0u8; 65536],
-                file_base: bytes_done,
-                bytes_in_file: 0,
-                last_emit: Instant::now(),
-                app: app.clone(),
-                file_index,
-                file_count,
-                bytes_total,
-                upload_start,
-                dest_path: file.dest_relative_path.clone(),
-            };
 
-            let body_stream = futures_util::stream::unfold(stream_state, |mut st| async move {
-                if remote_transfer_cancelled() {
-                    return Some((
-                        Err(std::io::Error::new(
-                            std::io::ErrorKind::Interrupted,
-                            "傳輸已取消",
-                        )),
-                        st,
-                    ));
-                }
-                match st.file.read(&mut st.buf).await {
-                    Ok(0) => None,
-                    Ok(n) => {
-                        st.bytes_in_file += n as u64;
-                        let now = Instant::now();
-                        if now.duration_since(st.last_emit) >= Duration::from_millis(250) {
-                            st.last_emit = now;
-                            let elapsed = st.upload_start.elapsed().as_secs_f64().max(0.001);
-                            let current = st.file_base + st.bytes_in_file;
-                            let speed = (current as f64 / elapsed) as u64;
-                            emit_progress_active(
-                                &st.app,
-                                "uploading",
-                                st.file_index,
-                                st.file_count,
-                                current,
-                                st.bytes_total,
-                                speed,
-                                &st.dest_path,
-                                false,
-                                None,
-                                None,
-                            );
-                        }
-                        let chunk = Bytes::copy_from_slice(&st.buf[..n]);
-                        Some((Ok(chunk), st))
+            let bytes_in_file = Arc::new(AtomicU64::new(0));
+            let done_flag = Arc::new(AtomicBool::new(false));
+            let progress_bytes = Arc::clone(&bytes_in_file);
+            let progress_done = Arc::clone(&done_flag);
+            let progress_app = app.clone();
+            let dest_path = file.dest_relative_path.clone();
+            let file_base = bytes_done;
+            let progress_task = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(250));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    interval.tick().await;
+                    if progress_done.load(Ordering::Relaxed) || remote_transfer_cancelled() {
+                        break;
                     }
-                    Err(e) => Some((
-                        Err(std::io::Error::new(
-                            e.kind(),
-                            format!("讀取上傳檔失敗：{}", e),
-                        )),
-                        st,
-                    )),
+                    let current = file_base + progress_bytes.load(Ordering::Relaxed);
+                    let elapsed = upload_start.elapsed().as_secs_f64().max(0.001);
+                    let speed = (current as f64 / elapsed) as u64;
+                    emit_progress_active(
+                        &progress_app,
+                        "uploading",
+                        file_index,
+                        file_count,
+                        current,
+                        bytes_total,
+                        speed,
+                        &dest_path,
+                        false,
+                        None,
+                        None,
+                    );
                 }
             });
 
-            let resp = client
+            let counter = Arc::clone(&bytes_in_file);
+            let body_stream = ReaderStream::with_capacity(file_handle, UPLOAD_READ_BUF).map(
+                move |res| match res {
+                    Ok(chunk) => {
+                        if remote_transfer_cancelled() {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::Interrupted,
+                                "傳輸已取消",
+                            ));
+                        }
+                        counter.fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                        Ok(chunk)
+                    }
+                    Err(e) => Err(std::io::Error::new(
+                        e.kind(),
+                        format!("讀取上傳檔失敗：{e}"),
+                    )),
+                },
+            );
+
+            let send_result = client
                 .post(format!("http://{host}:{port}/api/v1/upload"))
                 .header("X-GM-Rel-Path-B64", path_b64)
                 .header("X-GM-On-Conflict", on_conflict)
+                .header("Content-Length", file_len.to_string())
                 .body(reqwest::Body::wrap_stream(body_stream))
                 .send()
-                .await
-                .with_context(|| format!("上傳失敗：{}", file.dest_relative_path))?;
+                .await;
+
+            done_flag.store(true, Ordering::Relaxed);
+            let _ = progress_task.await;
+
+            let resp =
+                send_result.with_context(|| format!("上傳失敗：{}", file.dest_relative_path))?;
             if !resp.status().is_success() {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();

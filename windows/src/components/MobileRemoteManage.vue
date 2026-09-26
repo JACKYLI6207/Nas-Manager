@@ -48,6 +48,11 @@ const manualTesting = ref(false)
 const favorites = ref<RemotePcFavorite[]>([])
 const showFavoritesExpanded = ref(false)
 const favoriteConnectingKey = ref('')
+const favoriteNameDialogOpen = ref(false)
+const favoriteNameDialogSuggested = ref('')
+const favoriteNameDialogValue = ref('')
+const favoriteNameDialogHost = ref('')
+const favoriteNameDialogPort = ref(8765)
 let scanGeneration = 0
 
 const scanLogCopyText = computed(() => scanLog.value)
@@ -107,11 +112,24 @@ function toggleFavorite(pc: { name: string; hosts: string[]; port: number; conne
     message: '',
     connectedHost: host,
   })
-  const input = window.prompt('請為此 PC 取名（方便辨認）', suggested)
-  if (input === null) return
-  const customName = input.trim() || suggested
-  favorites.value = addRemotePcFavorite(customName, host, pc.port)
-  applyFavoriteNameToPcList(host, pc.port, customName)
+  favoriteNameDialogSuggested.value = suggested
+  favoriteNameDialogValue.value = suggested
+  favoriteNameDialogHost.value = host
+  favoriteNameDialogPort.value = pc.port
+  favoriteNameDialogOpen.value = true
+}
+
+function cancelFavoriteNameDialog() {
+  favoriteNameDialogOpen.value = false
+}
+
+function confirmFavoriteNameDialog() {
+  const host = favoriteNameDialogHost.value
+  const port = favoriteNameDialogPort.value
+  const customName = favoriteNameDialogValue.value.trim() || favoriteNameDialogSuggested.value
+  favoriteNameDialogOpen.value = false
+  favorites.value = addRemotePcFavorite(customName, host, port)
+  applyFavoriteNameToPcList(host, port, customName)
 }
 
 async function connectToHost(
@@ -560,6 +578,30 @@ onMounted(async () => {
     </div>
   </div>
   </div>
+
+  <Teleport to="body">
+    <div
+      v-if="favoriteNameDialogOpen"
+      class="remote-fav-name-overlay"
+      @click.self="cancelFavoriteNameDialog"
+    >
+      <div class="remote-fav-name-panel" @click.stop>
+        <p class="remote-fav-name-title">請為此 PC 取名（方便辨認）</p>
+        <input
+          v-model="favoriteNameDialogValue"
+          class="remote-fav-name-input"
+          type="text"
+          maxlength="80"
+          autocomplete="off"
+          @keydown.enter.prevent="confirmFavoriteNameDialog"
+        />
+        <div class="remote-fav-name-actions">
+          <button type="button" class="tool tool--primary" @click="confirmFavoriteNameDialog">確認</button>
+          <button type="button" class="tool tool--ghost" @click="cancelFavoriteNameDialog">取消</button>
+        </div>
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -896,5 +938,49 @@ onMounted(async () => {
   max-height: 32vh;
   user-select: text;
   -webkit-user-select: text;
+}
+
+.remote-fav-name-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 120;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.remote-fav-name-panel {
+  width: min(100%, 360px);
+  padding: 18px;
+  border-radius: 12px;
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-sizing: border-box;
+}
+
+.remote-fav-name-title {
+  margin: 0 0 12px;
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.remote-fav-name-input {
+  width: 100%;
+  box-sizing: border-box;
+  margin-bottom: 14px;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font-size: 13px;
+}
+
+.remote-fav-name-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
 }
 </style>

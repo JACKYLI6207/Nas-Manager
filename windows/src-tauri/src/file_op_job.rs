@@ -20,6 +20,12 @@ pub struct FileOpJobProgress {
     pub message: String,
     pub finished: bool,
     pub error: Option<String>,
+    /// 最新一筆診斷日誌（相容舊客戶端）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_line: Option<String>,
+    /// 累積診斷日誌（避免兩次輪詢之間多行被覆蓋丟失）
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail_log: String,
 }
 
 struct JobSlot {
@@ -58,15 +64,36 @@ pub fn request_job_cancel() {
             if !p.finished {
                 p.phase = "cancelling".to_string();
                 p.message = "正在取消貼上…".to_string();
+                append_detail_log_locked(&mut p, "伺服器已收到取消請求，等待目前讀寫中斷…");
             }
         }
     }
 }
 
+fn append_detail_log_locked(p: &mut FileOpJobProgress, line: &str) {
+    let ts = chrono_like_now();
+    let full = format!("[{ts}] {line}");
+    if !p.detail_log.is_empty() {
+        p.detail_log.push('\n');
+    }
+    p.detail_log.push_str(&full);
+    p.log_line = Some(full);
+}
+
 pub struct ProgressCtx {
     cancel: Arc<AtomicBool>,
     progress: Arc<Mutex<FileOpJobProgress>>,
-    speed_anchor: Mutex<(Instant, u64)>,
+    speed_anchor: Arc<Mutex<(Instant, u64, u64)>>,
+}
+
+impl Clone for ProgressCtx {
+    fn clone(&self) -> Self {
+        Self {
+            cancel: Arc::clone(&self.cancel),
+            progress: Arc::clone(&self.progress),
+            speed_anchor: Arc::clone(&self.speed_anchor),
+        }
+    }
 }
 
 impl ProgressCtx {
@@ -74,7 +101,7 @@ impl ProgressCtx {
         Self {
             cancel,
             progress,
-            speed_anchor: Mutex::new((Instant::now(), 0)),
+            speed_anchor: Arc::new(Mutex::new((Instant::now(), 0, 0))),
         }
     }
 
@@ -104,10 +131,11 @@ impl ProgressCtx {
         if elapsed >= 0.25 {
             let delta = bytes_done.saturating_sub(anchor.1);
             let speed = (delta as f64 / elapsed) as u64;
-            *anchor = (Instant::now(), bytes_done);
+            *anchor = (Instant::now(), bytes_done, speed);
             speed
         } else {
-            0
+            // 保留上次速度，避免 UI 一直顯示空白
+            anchor.2
         }
     }
 
@@ -139,6 +167,33 @@ impl ProgressCtx {
         p.bytes_done = p.bytes_done.saturating_add(n);
         p.speed_bps = self.update_speed(p.bytes_done);
     }
+
+    /// 寫入一筆診斷 LOG（累積到 detail_log，避免輪詢間隔內多行丟失）
+    pub fn push_log(&self, line: &str) {
+        let mut p = self.lock_progress();
+        append_detail_log_locked(&mut p, line);
+        if let Some(ref full) = p.log_line {
+            tracing::info!(target: "cross_paste", "{full}");
+        }
+    }
+
+    pub fn set_message_keep_log(&self, message: &str) {
+        let mut p = self.lock_progress();
+        p.message = message.to_string();
+        p.speed_bps = self.update_speed(p.bytes_done);
+    }
+}
+
+fn chrono_like_now() -> String {
+    use std::time::SystemTime;
+    let Ok(dur) = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH) else {
+        return "?".to_string();
+    };
+    let secs = dur.as_secs();
+    let h = (secs / 3600) % 24;
+    let m = (secs / 60) % 60;
+    let s = secs % 60;
+    format!("{h:02}:{m:02}:{s:02}")
 }
 
 /// 資料夾內所有檔案大小加總（迭代，避免深層目錄 stack overflow）。
@@ -262,6 +317,12 @@ where
         bail!("已有檔案操作進行中");
     }
     let cancel = Arc::new(AtomicBool::new(false));
+    let mut initial = initial;
+    if initial.detail_log.is_empty() {
+        if let Some(ref line) = initial.log_line {
+            initial.detail_log = line.clone();
+        }
+    }
     let progress = Arc::new(Mutex::new(initial));
     *guard = Some(JobSlot {
         cancel: cancel.clone(),

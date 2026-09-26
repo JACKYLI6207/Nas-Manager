@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { copyTextFromTextarea } from '../copyText'
+import { pcConfirm } from '../pcDialog'
 import {
   activateComicStreamQueueJob,
   clearComicStreamLog,
@@ -68,8 +69,8 @@ function onRemoveQueueJob(job: (typeof fullQueue.value)[number]) {
   removeFromComicStreamQueue(job)
 }
 
-function onClearQueue() {
-  if (!window.confirm('確定清空串流列表？')) return
+async function onClearQueue() {
+  if (!(await pcConfirm('確定清空串流列表？'))) return
   clearCurrentComicStreamQueue()
 }
 

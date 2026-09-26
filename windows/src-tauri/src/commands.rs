@@ -317,6 +317,32 @@ pub async fn remote_pc_paste_with_progress(
 
 #[tauri::command(async)]
 #[specta::specta]
+pub async fn remote_pc_cross_paste_with_progress(
+    app: AppHandle,
+    source_host: String,
+    source_port: u16,
+    selections: Vec<crate::remote_pc_transfer::RemotePcTransferSelection>,
+    dest_host: String,
+    dest_port: u16,
+    dest_path: String,
+    mode: String,
+) -> CommandResult<crate::remote_pc_file_op::RemotePcFileOpResult> {
+    crate::remote_pc_cross_paste::remote_pc_cross_paste_with_progress(
+        &app,
+        &source_host,
+        source_port,
+        &selections,
+        &dest_host,
+        dest_port,
+        &dest_path,
+        &mode,
+    )
+    .await
+    .map_err(|err| CommandError::from("跨 PC 貼上失敗", err))
+}
+
+#[tauri::command(async)]
+#[specta::specta]
 pub fn cancel_remote_pc_file_op() {
     crate::remote_pc_file_op::cancel_remote_pc_file_op();
 }

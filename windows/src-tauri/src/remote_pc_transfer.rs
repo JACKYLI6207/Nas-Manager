@@ -204,7 +204,7 @@ fn parent_path(path: &str) -> String {
 }
 
 /// 手機寫入路徑：以勾選時所在目錄為基準，而非 PC 分享根目錄。
-fn phone_dest_relative_path(file_rel: &str, selection_path: &str, anchor_path: &str) -> String {
+pub(crate) fn phone_dest_relative_path(file_rel: &str, selection_path: &str, anchor_path: &str) -> String {
     let file = normalize_path(file_rel);
     let sel = normalize_path(selection_path);
     let anchor = normalize_path(anchor_path);
@@ -250,7 +250,7 @@ fn phone_dest_relative_path(file_rel: &str, selection_path: &str, anchor_path: &
     format!("{anchor_name}/{tail}")
 }
 
-async fn download_remote_file(
+pub(crate) async fn download_remote_file(
     app: &AppHandle,
     host: &str,
     port: u16,

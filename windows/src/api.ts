@@ -417,6 +417,26 @@ export function remotePcPasteWithProgress(host: string, port: number, destPath: 
   })
 }
 
+export function remotePcCrossPasteWithProgress(
+  sourceHost: string,
+  sourcePort: number,
+  selections: RemotePcTransferSelection[],
+  destHost: string,
+  destPort: number,
+  destPath: string,
+  mode: 'copy' | 'cut',
+) {
+  return invoke<RemotePcFileOpResult>('remote_pc_cross_paste_with_progress', {
+    sourceHost,
+    sourcePort,
+    selections,
+    destHost,
+    destPort,
+    destPath,
+    mode,
+  })
+}
+
 export function cancelRemotePcFileOp() {
   return invoke<null>('cancel_remote_pc_file_op')
 }

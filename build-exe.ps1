@@ -5,9 +5,27 @@ $RepoRoot = $PSScriptRoot
 $WindowsRoot = Join-Path $RepoRoot 'windows'
 $version = '1.1.0'
 $pkgJson = Join-Path $WindowsRoot 'package.json'
+$tauriConf = Join-Path $WindowsRoot 'src-tauri\tauri.conf.json'
 if (Test-Path $pkgJson) {
     $pkg = Get-Content $pkgJson -Raw | ConvertFrom-Json
     if ($pkg.version) { $version = $pkg.version }
+}
+
+# 視窗標題／productName 須與 package.json 同步，否則 EXE 頂部仍顯示舊版號
+if (Test-Path $tauriConf) {
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    $confText = [System.IO.File]::ReadAllText($tauriConf, $utf8NoBom)
+    $wantProduct = "Nas-Manager-Windows-v$version"
+    $confObj = $confText | ConvertFrom-Json
+    $changed = $false
+    if ($confObj.version -ne $version) { $confObj.version = $version; $changed = $true }
+    if ($confObj.productName -ne $wantProduct) { $confObj.productName = $wantProduct; $changed = $true }
+    if ($confObj.app.windows[0].title -ne $wantProduct) { $confObj.app.windows[0].title = $wantProduct; $changed = $true }
+    if ($changed) {
+        $updated = ($confObj | ConvertTo-Json -Depth 20)
+        [System.IO.File]::WriteAllText($tauriConf, $updated, $utf8NoBom)
+        Write-Host ("Synced tauri.conf.json title/productName -> $wantProduct") -ForegroundColor DarkGray
+    }
 }
 
 $builtExe = Join-Path $WindowsRoot 'src-tauri\target\release\Nas-Manager-Windows.exe'

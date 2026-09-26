@@ -3,13 +3,17 @@ package com.gentleman.manager.android
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.view.ViewConfiguration
 import kotlin.math.abs
 
 /**
  * 雙指捏合縮放影片畫面；放大後可單指拖移。
+ * 放大時 OnTouchListener 會吃掉 DOWN，無法靠回傳 false 讓 PlayerView 自己點擊切 UI，
+ * 因此未拖移的輕點改由 [onTapWhileZoomed] 處理。
  */
 class VideoPinchZoomHelper(
     private val zoomTarget: View,
+    private val onTapWhileZoomed: (() -> Unit)? = null,
 ) {
     private var scaleFactor = 1f
     private var translateX = 0f
@@ -18,6 +22,7 @@ class VideoPinchZoomHelper(
     private var lastPanY = 0f
     private var panning = false
     private var panMoved = false
+    private val touchSlop = ViewConfiguration.get(zoomTarget.context).scaledTouchSlop
 
     private val scaleGestureDetector =
         ScaleGestureDetector(
@@ -70,23 +75,29 @@ class VideoPinchZoomHelper(
                 if (panning && event.pointerCount == 1 && scaleFactor > MIN_SCALE + 0.01f) {
                     val dx = event.x - lastPanX
                     val dy = event.y - lastPanY
-                    if (abs(dx) > 2f || abs(dy) > 2f) {
+                    if (!panMoved && (abs(dx) > touchSlop || abs(dy) > touchSlop)) {
                         panMoved = true
                     }
-                    translateX += dx
-                    translateY += dy
-                    lastPanX = event.x
-                    lastPanY = event.y
-                    clampTranslation()
-                    applyTransform()
+                    if (panMoved) {
+                        translateX += dx
+                        translateY += dy
+                        lastPanX = event.x
+                        lastPanY = event.y
+                        clampTranslation()
+                        applyTransform()
+                    }
                     handled = true
                 }
             }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-                if (panning && !panMoved && event.pointerCount <= 1) {
-                    panning = false
-                    return false
+            MotionEvent.ACTION_UP -> {
+                val wasTap = panning && !panMoved && event.pointerCount <= 1
+                panning = false
+                if (wasTap) {
+                    onTapWhileZoomed?.invoke()
+                    return true
                 }
+            }
+            MotionEvent.ACTION_CANCEL -> {
                 panning = false
             }
         }

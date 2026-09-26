@@ -62,8 +62,14 @@ async function withZipSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-function cacheKey(job: RemoteStreamJob, kind: StreamFavoriteCoverKind): string {
-  return `${kind}:${job.host.trim().toLowerCase()}:${job.port}:${normPath(job.relPath)}`
+/** 以「目前可達 host」為鍵，避免區網收藏在 Tailscale 連線時仍命中舊 LAN URL */
+function cacheKey(
+  host: string,
+  port: number,
+  relPath: string,
+  kind: StreamFavoriteCoverKind,
+): string {
+  return `${kind}:${host.trim().toLowerCase()}:${port}:${normPath(relPath)}`
 }
 
 async function findImageByIndexPairing(
@@ -97,18 +103,13 @@ async function findImageByIndexPairing(
   }
 }
 
-async function findComicZipFirstPageUrl(job: RemoteStreamJob): Promise<string | null> {
+async function findComicZipFirstPageUrl(
+  job: RemoteStreamJob,
+  host: string,
+  port: number,
+): Promise<string | null> {
   return withZipSlot(async () => {
     try {
-      let host = job.host
-      let port = job.port
-      try {
-        const resolved = await resolveStreamJobHost(job)
-        host = resolved.host
-        port = resolved.port
-      } catch {
-        /* 用原 host 繼續 */
-      }
       const pages = await fetchRemoteComicPages(host, port, job.relPath)
       const first = pages.pages[0]
       if (!first) return null
@@ -125,6 +126,7 @@ async function findComicZipFirstPageUrl(job: RemoteStreamJob): Promise<string | 
  * 解析串流收藏項目的封面 URL：
  * - 影片：`.../影片清單/...` → 同層 `封面清單` 同檔名圖片
  * - 漫畫：封面清單（同名→索引配對）→ ZIP 第一頁
+ * - 先 `resolveStreamJobHost`（區網／Tailscale），與播放一致；遠端管理縮圖用當前連線 host，收藏不可死釘 job.host
  * 失敗不永久快取，可重試。
  */
 function bustStreamUrl(url: string): string {
@@ -137,7 +139,17 @@ export async function resolveStreamFavoriteCoverUrl(
   job: RemoteStreamJob,
   kind: StreamFavoriteCoverKind,
 ): Promise<string | null> {
-  const key = cacheKey(job, kind)
+  let host = job.host
+  let port = job.port
+  try {
+    const resolved = await resolveStreamJobHost(job)
+    host = resolved.host
+    port = resolved.port
+  } catch {
+    /* 用原 host 繼續 */
+  }
+
+  const key = cacheKey(host, port, job.relPath, kind)
   const cached = coverUrlCache.get(key)
   if (cached && Date.now() - cached.at <= COVER_TTL_MS) return cached.url
   if (cached) {
@@ -158,14 +170,14 @@ export async function resolveStreamFavoriteCoverUrl(
     const coverDir = findCoverSiblingDir(job.relPath, marker)
     let url: string | null = null
     if (coverDir) {
-      url = await resolveSiblingCoverUrl(job.host, job.port, job.relPath, marker)
+      url = await resolveSiblingCoverUrl(host, port, job.relPath, marker)
       if (!url && kind === 'comic') {
-        url = await findImageByIndexPairing(job.host, job.port, job, coverDir, isComicZipFileName)
+        url = await findImageByIndexPairing(host, port, job, coverDir, isComicZipFileName)
       }
     }
     // 漫畫：無封面圖或路徑不含「漫畫清單」時，一律試 ZIP 首頁
     if (!url && kind === 'comic' && isComicZipFileName(baseName(job.relPath))) {
-      url = await findComicZipFirstPageUrl(job)
+      url = await findComicZipFirstPageUrl(job, host, port)
     }
     if (url) {
       const finalUrl = bustStreamUrl(url)
@@ -208,14 +220,21 @@ export function maybeRefreshStreamFavoriteCovers() {
 
 /** 清除單一項目失敗／過期快取，供縮圖重試 */
 export function invalidateStreamFavoriteCover(job: RemoteStreamJob, kind: StreamFavoriteCoverKind) {
-  const key = cacheKey(job, kind)
-  const prev = coverUrlCache.get(key)
-  if (prev?.url.startsWith('blob:')) {
-    try {
-      URL.revokeObjectURL(prev.url)
-    } catch {
-      /* ignore */
+  const host = job.host.trim().toLowerCase()
+  const path = normPath(job.relPath)
+  for (const key of [...coverUrlCache.keys()]) {
+    if (key.startsWith(`${kind}:`) && key.endsWith(`:${job.port}:${path}`)) {
+      const prev = coverUrlCache.get(key)
+      if (prev?.url.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(prev.url)
+        } catch {
+          /* ignore */
+        }
+      }
+      coverUrlCache.delete(key)
     }
   }
-  coverUrlCache.delete(key)
+  // 亦清原 host 鍵（相容）
+  coverUrlCache.delete(cacheKey(host, job.port, job.relPath, kind))
 }

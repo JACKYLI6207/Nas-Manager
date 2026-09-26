@@ -8,7 +8,7 @@ use std::{
 use anyhow::{anyhow, Context};
 use axum::{
     body::Body,
-    extract::{Query, State},
+    extract::{DefaultBodyLimit, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::Response,
     routing::{get, post},
@@ -18,9 +18,8 @@ use base64::Engine;
 use futures_util::StreamExt;
 use tokio::{
     fs::File,
-    io::{AsyncReadExt, AsyncSeekExt},
+    io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufWriter},
 };
-use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 use mdns_sd::{ServiceDaemon, ServiceInfo};
 use parking_lot::Mutex as SyncMutex;
@@ -737,7 +736,14 @@ async fn start_async(app: &AppHandle, config: &Config) -> anyhow::Result<()> {
             )
             .route("/api/v1/comic/page", post(comic_page_post_handler))
             .route("/api/v1/upload-exists", post(upload_exists_post_handler))
-            .route("/api/v1/upload", post(upload_post_handler))
+            .route(
+                "/api/v1/upload",
+                post(upload_post_handler).layer(DefaultBodyLimit::disable()),
+            )
+            .route(
+                "/api/v1/xfer-source/download",
+                post(xfer_source_download_post_handler),
+            )
             .route("/api/v1/file-op", post(file_op_post_handler))
             .route("/api/v1/file-op/progress", get(file_op_progress_handler))
             .route("/api/v1/file-op/cancel", post(file_op_cancel_handler))
@@ -860,7 +866,7 @@ async fn health_handler(State(state): State<HttpState>) -> Json<HealthResponse> 
         ok: true,
         app: "Nas Manager",
         version: env!("CARGO_PKG_VERSION"),
-        remote_api: 12,
+        remote_api: 14,
         share_mounts,
     })
 }
@@ -999,11 +1005,9 @@ fn list_directory_entries(dir: &Path) -> anyhow::Result<Vec<RemoteDirEntry>> {
             continue;
         }
         let meta = entry.metadata()?;
-        let child_path = entry.path();
+        // 僅檔案回報大小；資料夾若遞迴加總會在磁碟根（C:\ 等）卡死數十秒～數分鐘
         let size = if meta.is_file() {
             Some(meta.len())
-        } else if meta.is_dir() {
-            Some(directory_contents_size(&child_path))
         } else {
             None
         };
@@ -1022,26 +1026,6 @@ fn list_directory_entries(dir: &Path) -> anyhow::Result<Vec<RemoteDirEntry>> {
         _ => compare_entry_name(&a.name, &b.name),
     });
     Ok(entries)
-}
-
-/// 資料夾內所有檔案大小加總（含子資料夾，不含資料夾本身 metadata）。
-fn directory_contents_size(dir: &Path) -> u64 {
-    let mut total = 0u64;
-    let Ok(read_dir) = std::fs::read_dir(dir) else {
-        return 0;
-    };
-    for entry in read_dir.flatten() {
-        let path = entry.path();
-        let Ok(meta) = entry.metadata() else {
-            continue;
-        };
-        if meta.is_file() {
-            total += meta.len();
-        } else if meta.is_dir() {
-            total += directory_contents_size(&path);
-        }
-    }
-    total
 }
 
 #[cfg(windows)]
@@ -1725,7 +1709,8 @@ async fn serve_download(
         Err(err) => return Err((StatusCode::INTERNAL_SERVER_ERROR, err.to_string())),
     };
     let len = file.metadata().await.ok().map(|m| m.len());
-    let stream = ReaderStream::new(file);
+    // 大緩衝：跨 PC 拉檔時避免 8KB 小塊造成 TCP 停停走走
+    let stream = ReaderStream::with_capacity(file, 1024 * 1024);
     let body = Body::from_stream(stream);
     let mut builder = Response::builder().header("content-type", "application/octet-stream");
     if let Some(len) = len {
@@ -1878,15 +1863,26 @@ async fn upload_post_handler(
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     }
-    let mut file = tokio::fs::File::create(&target)
+    let file = tokio::fs::File::create(&target)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // 4MiB BufWriter：與跨 PC 貼上／下載大緩衝對齊，避免小塊 write 回饋拖慢 LAN
+    let mut file = BufWriter::with_capacity(4 * 1024 * 1024, file);
     let mut stream = body.into_data_stream();
+    let mut since_flush = 0u64;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let n = chunk.len() as u64;
         file.write_all(&chunk)
             .await
             .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        since_flush += n;
+        if since_flush >= 8 * 1024 * 1024 {
+            file.flush()
+                .await
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            since_flush = 0;
+        }
     }
     file.flush()
         .await
@@ -1896,6 +1892,31 @@ async fn upload_post_handler(
         ok: true,
         path: written,
     }))
+}
+
+async fn xfer_source_download_post_handler(
+    Json(body): Json<XferSourceDownloadBody>,
+) -> Result<Response, (StatusCode, String)> {
+    let path = crate::xfer_source::resolve_file(&body.token, &body.path).map_err(|e| {
+        (StatusCode::BAD_REQUEST, e.to_string())
+    })?;
+    if !path.is_file() {
+        return Err((StatusCode::BAD_REQUEST, "不是檔案".to_string()));
+    }
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let len = file.metadata().await.ok().map(|m| m.len());
+    // 與 /download 相同：1MiB 串流 + Content-Length，讓目的端拉取可跑滿區網
+    let stream = ReaderStream::with_capacity(file, 1024 * 1024);
+    let body = Body::from_stream(stream);
+    let mut builder = Response::builder().header("content-type", "application/octet-stream");
+    if let Some(len) = len {
+        builder = builder.header("content-length", len.to_string());
+    }
+    builder
+        .body(body)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
 }
 
 fn rel_path_from_share(share_root: &Path, absolute: &Path) -> Option<String> {
@@ -2023,6 +2044,14 @@ fn remote_clipboard_slot() -> &'static SyncMutex<Option<RemoteClipboard>> {
     REMOTE_CLIPBOARD.get_or_init(|| SyncMutex::new(None))
 }
 
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct FileOpSelection {
+    path: String,
+    #[serde(default)]
+    anchor_path: String,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct FileOpBody {
@@ -2035,6 +2064,39 @@ struct FileOpBody {
     new_name: String,
     #[serde(default, rename = "async")]
     async_op: bool,
+    /// 跨 PC 貼上：來源主機（由目標 PC 直接拉取）
+    #[serde(default)]
+    source_host: String,
+    #[serde(default)]
+    source_port: u16,
+    /// copy | cut
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    selections: Vec<FileOpSelection>,
+    /// pull-upload：來源暫存 token
+    #[serde(default)]
+    xfer_token: String,
+    /// overwrite | keep_both
+    #[serde(default)]
+    on_conflict: String,
+    #[serde(default)]
+    xfer_files: Vec<XferFileSpec>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct XferFileSpec {
+    relative_path: String,
+    #[serde(default)]
+    size: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct XferSourceDownloadBody {
+    token: String,
+    path: String,
 }
 
 #[derive(Serialize)]
@@ -2460,6 +2522,8 @@ fn start_async_paste(state: HttpState, dest_path: &str) -> FileOpResponse {
         message: "正在計算大小…".to_string(),
         finished: false,
         error: None,
+        log_line: None,
+        detail_log: String::new(),
     };
     let state_for_job = state.clone();
     if let Err(e) = start_paste_job(initial, move |ctx| {
@@ -2470,6 +2534,222 @@ fn start_async_paste(state: HttpState, dest_path: &str) -> FileOpResponse {
     FileOpResponse {
         ok: true,
         message: "已開始貼上".to_string(),
+        clipboard_count: None,
+    }
+}
+
+fn start_async_cross_paste(state: HttpState, body: FileOpBody) -> FileOpResponse {
+    use crate::cross_pc_paste::CrossPasteSelection;
+
+    if crate::file_op_job::job_running() {
+        return fail_op(anyhow!("已有檔案操作進行中"));
+    }
+    let source_host = body.source_host.trim().to_string();
+    if source_host.is_empty() || body.source_port == 0 {
+        return fail_op(anyhow!("跨 PC 貼上缺少來源主機"));
+    }
+    let selections: Vec<CrossPasteSelection> = body
+        .selections
+        .iter()
+        .map(|s| CrossPasteSelection {
+            path: s.path.trim().trim_start_matches(['/', '\\']).replace('\\', "/"),
+            anchor_path: s
+                .anchor_path
+                .trim()
+                .trim_start_matches(['/', '\\'])
+                .replace('\\', "/"),
+        })
+        .filter(|s| !s.path.is_empty())
+        .collect();
+    if selections.is_empty() {
+        // 相容：也接受 paths
+        let fallback: Vec<CrossPasteSelection> = body
+            .paths
+            .iter()
+            .map(|p| {
+                let path = p.trim().trim_start_matches(['/', '\\']).replace('\\', "/");
+                CrossPasteSelection {
+                    path: path.clone(),
+                    anchor_path: String::new(),
+                }
+            })
+            .filter(|s| !s.path.is_empty())
+            .collect();
+        if fallback.is_empty() {
+            return fail_op(anyhow!("跨 PC 貼上未指定來源路徑"));
+        }
+        return start_async_cross_paste_inner(
+            state,
+            source_host,
+            body.source_port,
+            body.mode,
+            body.dest_path,
+            fallback,
+        );
+    }
+    start_async_cross_paste_inner(
+        state,
+        source_host,
+        body.source_port,
+        body.mode,
+        body.dest_path,
+        selections,
+    )
+}
+
+fn start_async_cross_paste_inner(
+    state: HttpState,
+    source_host: String,
+    source_port: u16,
+    mode: String,
+    dest_path: String,
+    selections: Vec<crate::cross_pc_paste::CrossPasteSelection>,
+) -> FileOpResponse {
+    use crate::cross_pc_paste::execute_cross_paste;
+    use crate::file_op_job::{start_paste_job, FileOpJobProgress};
+
+    // 不要在 HTTP 回應前做 health／列檔，否則客戶端一直等、日誌也出不來
+    let dest_rel = dest_path
+        .trim()
+        .trim_start_matches(['/', '\\'])
+        .replace('\\', "/");
+    let dest_dir = match state.resolve_browse_dir(&dest_rel) {
+        Ok(d) => d,
+        Err(e) => return fail_op(e),
+    };
+
+    let mode = if mode.trim().eq_ignore_ascii_case("cut") {
+        "cut".to_string()
+    } else {
+        "copy".to_string()
+    };
+    let file_count = selections.len() as u32;
+    let initial = FileOpJobProgress {
+        phase: "scanning".to_string(),
+        file_index: 0,
+        file_count,
+        bytes_done: 0,
+        bytes_total: 0,
+        speed_bps: 0,
+        message: "準備跨 PC 貼上…".to_string(),
+        finished: false,
+        error: None,
+        log_line: Some(format!(
+            "任務已啟動：來源 {source_host}:{source_port}，選取 {file_count} 項，目標 `{dest_rel}`"
+        )),
+        detail_log: format!(
+            "任務已啟動：來源 {source_host}:{source_port}，選取 {file_count} 項，目標 `{dest_rel}`"
+        ),
+    };
+    let state_for_job = state.clone();
+    let dest_rel_for_job = dest_rel.clone();
+    if let Err(e) = start_paste_job(initial, move |ctx| {
+        execute_cross_paste(
+            &source_host,
+            source_port,
+            &selections,
+            &mode,
+            &dest_dir,
+            &dest_rel_for_job,
+            &|api_rel| state_for_job.resolve_upload_path(api_rel),
+            ctx,
+        )
+    }) {
+        return fail_op(e);
+    }
+    FileOpResponse {
+        ok: true,
+        message: "已開始跨 PC 貼上".to_string(),
+        clipboard_count: None,
+    }
+}
+
+fn start_async_pull_upload(state: HttpState, body: FileOpBody) -> FileOpResponse {
+    use crate::cross_pc_paste::{execute_pull_upload, PullUploadFile};
+    use crate::file_op_job::{start_paste_job, FileOpJobProgress};
+
+    if crate::file_op_job::job_running() {
+        return fail_op(anyhow!("已有檔案操作進行中"));
+    }
+    let source_host = body.source_host.trim().to_string();
+    if source_host.is_empty() || body.source_port == 0 {
+        return fail_op(anyhow!("上傳拉取缺少來源主機"));
+    }
+    let token = body.xfer_token.trim().to_string();
+    if token.is_empty() {
+        return fail_op(anyhow!("上傳拉取缺少暫存 token"));
+    }
+    let files: Vec<PullUploadFile> = body
+        .xfer_files
+        .iter()
+        .map(|f| PullUploadFile {
+            relative_path: f
+                .relative_path
+                .trim()
+                .trim_start_matches(['/', '\\'])
+                .replace('\\', "/"),
+            size: f.size,
+        })
+        .filter(|f| !f.relative_path.is_empty())
+        .collect();
+    if files.is_empty() {
+        return fail_op(anyhow!("上傳拉取未指定檔案"));
+    }
+
+    let dest_rel = body
+        .dest_path
+        .trim()
+        .trim_start_matches(['/', '\\'])
+        .replace('\\', "/");
+    let on_conflict = if body.on_conflict.trim().is_empty() {
+        "overwrite".to_string()
+    } else {
+        body.on_conflict.trim().to_string()
+    };
+
+    let file_count = files.len() as u32;
+    let initial = FileOpJobProgress {
+        phase: "scanning".to_string(),
+        file_index: 0,
+        file_count,
+        bytes_done: 0,
+        bytes_total: 0,
+        speed_bps: 0,
+        message: "準備上傳（目的端拉取）…".to_string(),
+        finished: false,
+        error: None,
+        log_line: Some(format!(
+            "任務已啟動：來源 {source_host}:{}，{file_count} 個檔案，目標 `{dest_rel}`",
+            body.source_port
+        )),
+        detail_log: format!(
+            "任務已啟動：來源 {source_host}:{}，{file_count} 個檔案，目標 `{dest_rel}`",
+            body.source_port
+        ),
+    };
+    let state_for_job = state.clone();
+    let dest_rel_for_job = dest_rel.clone();
+    let source_port = body.source_port;
+    if let Err(e) = start_paste_job(initial, move |ctx| {
+        execute_pull_upload(
+            &source_host,
+            source_port,
+            &token,
+            &files,
+            &dest_rel_for_job,
+            &on_conflict,
+            &|api_rel, conflict| {
+                resolve_upload_target_state(&state_for_job, api_rel, conflict)
+                    .map_err(|msg| anyhow!(msg))
+            },
+            ctx,
+        )
+    }) {
+        return fail_op(e);
+    }
+    FileOpResponse {
+        ok: true,
+        message: "已開始上傳（目的端拉取）".to_string(),
         clipboard_count: None,
     }
 }
@@ -2500,7 +2780,22 @@ async fn file_op_post_handler(
     State(state): State<HttpState>,
     Json(body): Json<FileOpBody>,
 ) -> Json<FileOpResponse> {
-    if body.action.trim().eq_ignore_ascii_case("paste") && body.async_op {
+    let action = body.action.trim().to_lowercase();
+    if action == "cross-paste" || action == "cross_paste" {
+        let state = state.clone();
+        let resp = tokio::task::spawn_blocking(move || start_async_cross_paste(state, body))
+            .await
+            .unwrap_or_else(|e| fail_op(anyhow!("{e}")));
+        return Json(resp);
+    }
+    if action == "pull-upload" || action == "pull_upload" {
+        let state = state.clone();
+        let resp = tokio::task::spawn_blocking(move || start_async_pull_upload(state, body))
+            .await
+            .unwrap_or_else(|e| fail_op(anyhow!("{e}")));
+        return Json(resp);
+    }
+    if action == "paste" && body.async_op {
         let state = state.clone();
         let dest = body.dest_path.clone();
         let resp = tokio::task::spawn_blocking(move || start_async_paste(state, &dest))

@@ -26,6 +26,10 @@ fn file_op_cancelled() -> bool {
     REMOTE_FILE_OP_CANCEL.load(Ordering::Relaxed)
 }
 
+pub fn is_remote_file_op_cancelled() -> bool {
+    file_op_cancelled()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RemotePcFileOpResult {
@@ -71,6 +75,10 @@ struct FileOpProgressSnapshot {
     message: String,
     finished: bool,
     error: Option<String>,
+    #[serde(default)]
+    log_line: Option<String>,
+    #[serde(default)]
+    detail_log: String,
 }
 
 fn emit_paste_progress(
@@ -79,6 +87,11 @@ fn emit_paste_progress(
     finished: bool,
     error: Option<String>,
 ) {
+    let detail = if !snap.detail_log.is_empty() {
+        Some(snap.detail_log.clone())
+    } else {
+        snap.log_line.clone()
+    };
     let _ = RemoteTransferProgressEvent {
         phase: snap.phase.clone(),
         file_index: snap.file_index,
@@ -89,7 +102,7 @@ fn emit_paste_progress(
         message: snap.message.clone(),
         finished,
         error,
-        detail_log: None,
+        detail_log: detail,
         succeeded_paths: None,
         failed_items: None,
     }
@@ -237,6 +250,8 @@ pub async fn remote_pc_paste_with_progress(
             message: "正在計算大小…".to_string(),
             finished: false,
             error: None,
+            log_line: None,
+            detail_log: String::new(),
         },
         false,
         None,
@@ -271,6 +286,8 @@ pub async fn remote_pc_paste_with_progress(
                             message: "PC 連線中斷，重試中…".to_string(),
                             finished: false,
                             error: None,
+                            log_line: None,
+                            detail_log: String::new(),
                         },
                         false,
                         None,
@@ -316,6 +333,8 @@ pub async fn remote_pc_paste_with_progress(
                     message: "貼上已取消".to_string(),
                     finished: true,
                     error: Some("已取消".to_string()),
+                    log_line: None,
+                    detail_log: String::new(),
                 },
                 true,
                 Some("已取消".to_string()),

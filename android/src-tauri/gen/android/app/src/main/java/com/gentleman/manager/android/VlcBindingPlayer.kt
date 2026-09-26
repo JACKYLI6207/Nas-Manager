@@ -138,6 +138,6 @@ class VlcBindingPlayer(
     companion object {
         private const val POLL_MS = 400L
         private const val PLAYLIST_UID = "vlc-media-0"
-        private const val SEEK_MS = 10_000L
+        private const val SEEK_MS = 30_000L
     }
 }

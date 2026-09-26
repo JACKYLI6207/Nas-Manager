@@ -84,7 +84,8 @@ export function hostsForPcName(displayName: string, port: number): string[] {
 
 /**
  * 依目前 job 的 host／pcName，收集所有可能可達的 host（原 host + 同名 PC 登錄 + 同名收藏）。
- * 排序：原 host 優先，其次區網私網，再 Tailscale。
+ * 排序：最近登錄成功的 host 優先（遠端管理剛連 Tailscale 時縮圖／播放應先試 100.x），
+ * 其次原 job.host，再區網私網，最後其他 Tailscale。
  */
 export function candidateHostsForStreamJob(job: {
   host: string
@@ -115,8 +116,11 @@ export function candidateHostsForStreamJob(job: {
   const hosts = new Set<string>()
   if (primary) hosts.add(primary)
 
+  let recentPreferred = ''
   for (const name of names) {
-    for (const h of hostsForPcName(name, job.port)) hosts.add(h)
+    const registered = hostsForPcName(name, job.port)
+    if (!recentPreferred && registered[0]) recentPreferred = registered[0].trim()
+    for (const h of registered) hosts.add(h)
     for (const fav of favs) {
       if (fav.port !== job.port) continue
       if (normalizePcName(fav.name) === normalizePcName(name)) {
@@ -126,7 +130,12 @@ export function candidateHostsForStreamJob(job: {
   }
 
   const list = [...hosts].filter(Boolean)
+  const preferred = recentPreferred
   list.sort((a, b) => {
+    if (preferred) {
+      if (a === preferred) return -1
+      if (b === preferred) return 1
+    }
     if (a === primary) return -1
     if (b === primary) return 1
     const at = looksLikeTailscaleHost(a)

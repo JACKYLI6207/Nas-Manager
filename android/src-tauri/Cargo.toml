@@ -1,6 +1,6 @@
 [package]
 name = "gentleman-manager-android"
-version = "1.2.1"
+version = "2.0.0"
 description = "Gentleman Manager Android"
 authors = ["Nas Manager Contributors"]
 edition = "2021"
@@ -34,6 +34,7 @@ tracing = { version = "0.1.41" }
 tracing-subscriber = { version = "0.3.19", features = ["json", "time", "local-time"] }
 tracing-appender = { version = "0.2.3" }
 tokio = { version = "1.43.0", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
 scraper = { version = "0.23.1" }
 image = { version = "0.25.5", default-features = false, features = ["jpeg", "png", "webp"] }
 bytes = { version = "1.10.1" }

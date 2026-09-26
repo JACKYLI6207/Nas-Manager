@@ -19,6 +19,7 @@ import {
 } from '../api'
 import { copyTextFromTextarea } from '../copyText'
 import { formatInvokeError } from '../invokeError'
+import { pcConfirm } from '../pcDialog'
 import {
   jobKey,
   videoFavoriteAdapter,
@@ -545,12 +546,10 @@ async function onPickQueueJob(job: RemoteStreamJob) {
     backgroundSession.value = null
   }
   activateStreamQueueJob(job)
-  await nextTick()
-  await processRemoteStreamQueue()
 }
 
-function onClearCurrentPlaylist() {
-  if (!window.confirm('確定清空串流列表？')) return
+async function onClearCurrentPlaylist() {
+  if (!(await pcConfirm('確定清空串流列表？'))) return
   void stopPlaybackCompletely()
   clearCurrentStreamQueue()
   status.value = '已清空串流列表'
@@ -590,8 +589,6 @@ async function onPlayFavoriteItem(job: RemoteStreamJob, sourceJobs: RemoteStream
     backgroundSession.value = null
   }
   activateStreamQueueJob(job, sourceJobs, { fromFavorites: true })
-  await nextTick()
-  await processRemoteStreamQueue()
 }
 
 async function resumeCurrentStream() {

@@ -35,6 +35,8 @@ const errorMsg = ref('')
 const newGroupIndex = ref(0)
 /** 跳過命名，其餘（含目前）全部用資料夾名 */
 const skipNamingAll = ref(false)
+const newCategoryOpen = ref(false)
+const newCategoryName = ref('')
 
 /** 不可用 computed(loadState)：無響應依賴會快取舊列表，剛新建的收藏不會出現 */
 const state = ref<FavoriteStreamStateBase>(props.adapter.loadState())
@@ -88,6 +90,8 @@ function resetToChoose() {
   errorMsg.value = ''
   newGroupIndex.value = 0
   skipNamingAll.value = false
+  newCategoryOpen.value = false
+  newCategoryName.value = ''
   ensureCategorySelected()
 }
 
@@ -100,9 +104,23 @@ watch(
   },
 )
 
-function onCreateCategory() {
-  const name = window.prompt('新增主分類名稱')
-  if (name === null || !name.trim()) return
+function openCreateCategoryForm() {
+  newCategoryOpen.value = true
+  newCategoryName.value = ''
+  errorMsg.value = ''
+}
+
+function cancelCreateCategory() {
+  newCategoryOpen.value = false
+  newCategoryName.value = ''
+}
+
+function confirmCreateCategory() {
+  const name = newCategoryName.value.trim()
+  if (!name) {
+    errorMsg.value = '請輸入主分類名稱'
+    return
+  }
   const beforeIds = new Set(state.value.categories.map((c) => c.id))
   const next = props.adapter.addCategory(name)
   state.value = next
@@ -110,6 +128,9 @@ function onCreateCategory() {
   const created = next.categories.find((c) => !beforeIds.has(c.id))
   categoryId.value = created?.id ?? next.categories[next.categories.length - 1]?.id ?? categoryId.value
   ensureCategorySelected()
+  newCategoryOpen.value = false
+  newCategoryName.value = ''
+  errorMsg.value = ''
 }
 
 function focusNameInput() {
@@ -224,9 +245,33 @@ function close() {
             <select id="fav-add-cat-choose" v-model="categoryId" class="fav-add-select fav-add-select--inline">
               <option v-for="c in state.categories" :key="c.id" :value="c.id">{{ c.name }}</option>
             </select>
-            <button type="button" class="fav-add-btn fav-add-btn--tiny" @click="onCreateCategory">
+            <button
+              v-if="!newCategoryOpen"
+              type="button"
+              class="fav-add-btn fav-add-btn--tiny"
+              @click="openCreateCategoryForm"
+            >
               + 新建
             </button>
+          </div>
+          <div v-if="newCategoryOpen" class="fav-add-new-cat">
+            <input
+              v-model="newCategoryName"
+              class="fav-add-input"
+              type="text"
+              maxlength="80"
+              autocomplete="off"
+              placeholder="主分類名稱"
+              @keydown.enter.prevent="confirmCreateCategory"
+            />
+            <div class="fav-add-new-cat-actions">
+              <button type="button" class="fav-add-btn fav-add-btn--tiny fav-add-btn--primary" @click="confirmCreateCategory">
+                建立
+              </button>
+              <button type="button" class="fav-add-btn fav-add-btn--tiny fav-add-btn--ghost" @click="cancelCreateCategory">
+                取消
+              </button>
+            </div>
           </div>
           <div class="fav-add-actions fav-add-actions--col">
             <button type="button" class="fav-add-btn fav-add-btn--primary" @click="openNewForm">
@@ -379,6 +424,16 @@ function close() {
   gap: 8px;
   align-items: center;
   margin-bottom: 14px;
+}
+
+.fav-add-new-cat {
+  margin: -6px 0 14px;
+}
+
+.fav-add-new-cat-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .fav-add-input,
