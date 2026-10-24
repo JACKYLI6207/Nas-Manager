@@ -60,6 +60,19 @@ pub struct RemoteTransferProgressEvent {
     /// 失敗的 PC 相對路徑與錯誤訊息（任務結束時）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failed_items: Option<Vec<RemoteTransferFailedItem>>,
+    /// 伺服端累計日誌行數（detail_log 為滾動尾端時，UI 以此計算新增行）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_seq: Option<u64>,
+}
+
+/// 單一事件內最多帶多少筆成功／失敗路徑（數十萬檔時避免 IPC 與 WebView 爆量）
+pub(crate) const EVENT_PATH_LIST_MAX: usize = 300;
+
+pub(crate) fn cap_event_list<T>(list: Option<Vec<T>>) -> Option<Vec<T>> {
+    list.map(|mut v| {
+        v.truncate(EVENT_PATH_LIST_MAX);
+        v
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Type)]
@@ -95,8 +108,9 @@ fn emit_progress(
         finished,
         error,
         detail_log,
-        succeeded_paths,
-        failed_items,
+        succeeded_paths: cap_event_list(succeeded_paths),
+        failed_items: cap_event_list(failed_items),
+        log_seq: None,
     }
     .emit(app);
 }
@@ -136,20 +150,33 @@ pub(crate) fn build_transfer_summary_log(
     succeeded: &[String],
     failed: &[RemoteTransferFailedItem],
 ) -> String {
+    const SUCCEEDED_SHOW: usize = 100;
     let mut log = String::new();
     log.push_str(&format!("成功 {} 個\n", succeeded.len()));
-    for path in succeeded {
+    for path in succeeded.iter().take(SUCCEEDED_SHOW) {
         log.push_str("  ✓ ");
         log.push_str(path);
         log.push('\n');
     }
+    if succeeded.len() > SUCCEEDED_SHOW {
+        log.push_str(&format!(
+            "  …（另 {} 個成功項目省略）\n",
+            succeeded.len() - SUCCEEDED_SHOW
+        ));
+    }
     log.push_str(&format!("\n失敗 {} 個\n", failed.len()));
-    for item in failed {
+    for item in failed.iter().take(EVENT_PATH_LIST_MAX) {
         log.push_str("  ✗ ");
         log.push_str(&item.path);
         log.push_str(": ");
         log.push_str(&item.error);
         log.push('\n');
+    }
+    if failed.len() > EVENT_PATH_LIST_MAX {
+        log.push_str(&format!(
+            "  …（另 {} 個失敗項目省略）\n",
+            failed.len() - EVENT_PATH_LIST_MAX
+        ));
     }
     log
 }

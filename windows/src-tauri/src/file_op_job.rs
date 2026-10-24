@@ -23,9 +23,27 @@ pub struct FileOpJobProgress {
     /// 最新一筆診斷日誌（相容舊客戶端）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub log_line: Option<String>,
-    /// 累積診斷日誌（避免兩次輪詢之間多行被覆蓋丟失）
+    /// 最近的診斷日誌（滾動保留尾端，避免長時間傳輸撐爆客戶端 WebView）
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub detail_log: String,
+    /// 累計寫入過的日誌行數；客戶端以此判斷新增幾行（detail_log 會被截斷）
+    #[serde(default)]
+    pub log_seq: u64,
+}
+
+const DETAIL_LOG_MAX_BYTES: usize = 48 * 1024;
+const DETAIL_LOG_KEEP_BYTES: usize = 32 * 1024;
+
+fn trim_detail_log(log: &mut String) {
+    if log.len() <= DETAIL_LOG_MAX_BYTES {
+        return;
+    }
+    let mut cut = log.len() - DETAIL_LOG_KEEP_BYTES;
+    while !log.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let start = log[cut..].find('\n').map(|i| cut + i + 1).unwrap_or(cut);
+    log.drain(..start);
 }
 
 struct JobSlot {
@@ -77,6 +95,8 @@ fn append_detail_log_locked(p: &mut FileOpJobProgress, line: &str) {
         p.detail_log.push('\n');
     }
     p.detail_log.push_str(&full);
+    trim_detail_log(&mut p.detail_log);
+    p.log_seq += 1;
     p.log_line = Some(full);
 }
 
@@ -322,6 +342,9 @@ where
         if let Some(ref line) = initial.log_line {
             initial.detail_log = line.clone();
         }
+    }
+    if initial.log_seq == 0 && !initial.detail_log.is_empty() {
+        initial.log_seq = initial.detail_log.lines().count() as u64;
     }
     let progress = Arc::new(Mutex::new(initial));
     *guard = Some(JobSlot {

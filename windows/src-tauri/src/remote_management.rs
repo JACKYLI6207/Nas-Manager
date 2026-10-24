@@ -2524,6 +2524,7 @@ fn start_async_paste(state: HttpState, dest_path: &str) -> FileOpResponse {
         error: None,
         log_line: None,
         detail_log: String::new(),
+        log_seq: 0,
     };
     let state_for_job = state.clone();
     if let Err(e) = start_paste_job(initial, move |ctx| {
@@ -2640,6 +2641,7 @@ fn start_async_cross_paste_inner(
         detail_log: format!(
             "任務已啟動：來源 {source_host}:{source_port}，選取 {file_count} 項，目標 `{dest_rel}`"
         ),
+        log_seq: 1,
     };
     let state_for_job = state.clone();
     let dest_rel_for_job = dest_rel.clone();
@@ -2726,6 +2728,7 @@ fn start_async_pull_upload(state: HttpState, body: FileOpBody) -> FileOpResponse
             "任務已啟動：來源 {source_host}:{}，{file_count} 個檔案，目標 `{dest_rel}`",
             body.source_port
         ),
+        log_seq: 1,
     };
     let state_for_job = state.clone();
     let dest_rel_for_job = dest_rel.clone();

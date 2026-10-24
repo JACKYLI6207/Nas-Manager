@@ -300,6 +300,7 @@ export type RemoteTransferProgressEvent = {
   detailLog?: string | null
   succeededPaths?: string[] | null
   failedItems?: RemoteTransferFailedItem[] | null
+  logSeq?: number | null
 }
 
 export function pickRemoteTransferDestination() {

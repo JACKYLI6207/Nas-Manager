@@ -21,7 +21,7 @@ use crate::remote_pc_file_op::{
     is_remote_file_op_cancelled, reset_remote_file_op_cancel,
 };
 use crate::remote_pc_transfer::{
-    build_transfer_summary_log, emit_progress_active, remote_transfer_cancelled,
+    build_transfer_summary_log, cap_event_list, emit_progress_active, remote_transfer_cancelled,
     reset_remote_transfer_cancel, RemoteTransferFailedItem, RemoteTransferProgressEvent,
 };
 use crate::xfer_source::{self, XferSourceFile};
@@ -267,6 +267,8 @@ struct FileOpProgressSnapshot {
     log_line: Option<String>,
     #[serde(default)]
     detail_log: String,
+    #[serde(default)]
+    log_seq: u64,
 }
 
 fn emit_pull_progress(app: &AppHandle, snap: &FileOpProgressSnapshot, finished: bool, error: Option<String>) {
@@ -302,6 +304,7 @@ fn emit_pull_progress(app: &AppHandle, snap: &FileOpProgressSnapshot, finished: 
         detail_log: detail,
         succeeded_paths: None,
         failed_items: None,
+        log_seq: (snap.log_seq > 0).then_some(snap.log_seq),
     }
     .emit(app);
 }
@@ -715,8 +718,9 @@ async fn upload_via_push(
         finished: true,
         error,
         detail_log: Some(summary_log),
-        succeeded_paths: Some(succeeded),
-        failed_items: Some(failed),
+        succeeded_paths: cap_event_list(Some(succeeded)),
+        failed_items: cap_event_list(Some(failed)),
+        log_seq: None,
     }
     .emit(app);
     Ok(())

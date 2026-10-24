@@ -136,7 +136,10 @@ let unlistenTransfer: (() => void) | null = null
 const pasteCrossPc = ref(false)
 /** 避免同一筆診斷 LOG 被進度輪詢重複追加 */
 let lastTransferDiagLog = ''
-let lastTransferProgressMsg = ''
+let lastTransferLogSeq = 0
+let lastTransferStatusKey = ''
+/** 長時間（數 TB）傳輸只保留最近日誌，避免 WebView 記憶體／CPU 爆量白屏 */
+const TRANSFER_LOG_MAX_LINES = 500
 
 function isVideoFile(name: string): boolean {
   return isVideoFileName(name)
@@ -152,13 +155,35 @@ const gridCols = computed(() => gridColsForRemoteBrowseLayout(viewLayout.value))
 
 function appendTransferLog(line: string) {
   const ts = new Date().toLocaleString('zh-TW', { hour12: false })
-  transferDebugLog.value = [...transferDebugLog.value, `[${ts}] ${line}`]
+  const log = transferDebugLog.value
+  log.push(`[${ts}] ${line}`)
+  if (log.length > TRANSFER_LOG_MAX_LINES) {
+    log.splice(0, log.length - TRANSFER_LOG_MAX_LINES)
+  }
 }
 
-/** PC 端累積 detailLog：只追加新增後綴，避免整段重貼或中間行丟失 */
-function appendPcDetailLogDelta(diagRaw: string) {
+function resetTransferLog() {
+  transferDebugLog.value = []
+  lastTransferDiagLog = ''
+  lastTransferLogSeq = 0
+  lastTransferStatusKey = ''
+}
+
+/** PC 端 detailLog 為滾動尾端：有 logSeq 時以序號差取尾端新行；舊版伺服端則比對前綴 */
+function appendPcDetailLogDelta(diagRaw: string, logSeq?: number | null) {
   const diag = diagRaw.replace(/\r\n/g, '\n').trimEnd()
-  if (!diag || diag === lastTransferDiagLog) return
+  if (!diag) return
+  if (typeof logSeq === 'number' && logSeq > 0) {
+    if (logSeq <= lastTransferLogSeq) return
+    const lines = diag.split('\n').filter((l) => l.trim())
+    const take = Math.min(logSeq - lastTransferLogSeq, lines.length, TRANSFER_LOG_MAX_LINES)
+    lastTransferLogSeq = logSeq
+    for (const line of lines.slice(lines.length - take)) {
+      appendTransferLog(line.trim())
+    }
+    return
+  }
+  if (diag === lastTransferDiagLog) return
   let added = diag
   if (lastTransferDiagLog && diag.startsWith(lastTransferDiagLog)) {
     added = diag.slice(lastTransferDiagLog.length).replace(/^\n+/, '')
@@ -167,7 +192,8 @@ function appendPcDetailLogDelta(diagRaw: string) {
     added = diag
   }
   lastTransferDiagLog = diag
-  for (const line of added.split('\n')) {
+  const addedLines = added.split('\n')
+  for (const line of addedLines.slice(-TRANSFER_LOG_MAX_LINES)) {
     const t = line.trim()
     if (t) appendTransferLog(t)
   }
@@ -250,12 +276,8 @@ function stopOverlayElapsedTimer() {
 }
 
 const transferDebugText = computed(() => {
-  const parts = [...transferDebugLog.value]
-  const detail = transferProgress.value?.detailLog
-  if (detail && !parts.includes(detail)) {
-    parts.push(detail)
-  }
-  return parts.join('\n')
+  if (transferDebugLog.value.length) return transferDebugLog.value.join('\n')
+  return transferProgress.value?.detailLog ?? ''
 })
 
 const transferLogCopyText = computed(() => {
@@ -998,7 +1020,7 @@ async function confirmUploadPicker() {
       policy = chosen
     }
     remoteBusy.value = true
-    transferDebugLog.value = []
+    resetTransferLog()
     appendTransferLog(
       `開始上傳 ${sources.length} 個來源 → PC ${host.value}:${props.pc.port}（${pathLabel.value}）`,
     )
@@ -1052,7 +1074,7 @@ async function startDownload() {
   const dest = await pickRemoteTransferDestination()
   if (!dest) return
   remoteBusy.value = true
-  transferDebugLog.value = []
+  resetTransferLog()
   appendTransferLog(`開始下載 → PC ${host.value}:${props.pc.port}`)
   startOverlayElapsedTimer()
   transferProgress.value = {
@@ -1102,7 +1124,7 @@ async function startDownload() {
 
 function closeTransferOverlay() {
   transferProgress.value = null
-  transferDebugLog.value = []
+  resetTransferLog()
   copyLogHint.value = ''
   stopOverlayElapsedTimer()
   transferStartedAt.value = 0
@@ -1135,9 +1157,7 @@ async function cancelActiveTransfer() {
 async function startPaste() {
   if (!host.value || remoteBusy.value) return
   remoteBusy.value = true
-  transferDebugLog.value = []
-  lastTransferDiagLog = ''
-  lastTransferProgressMsg = ''
+  resetTransferLog()
   const clip = loadRemotePcClipboard()
   const crossPc = clip != null && !isSameRemotePc(clip, host.value, props.pc.port)
   pasteCrossPc.value = crossPc
@@ -1467,19 +1487,21 @@ onMounted(async () => {
       transferProgress.value = ev.payload
       const diag = ev.payload.detailLog?.trim()
       if (diag) {
-        appendPcDetailLogDelta(diag)
+        appendPcDetailLogDelta(diag, ev.payload.logSeq)
       }
       const msg = ev.payload.message?.trim()
+      // 每秒速度訊息不入日誌；只在階段或檔案序號變化時記一筆
+      const statusKey = `${ev.payload.phase}|${ev.payload.fileIndex}`
       if (
         msg &&
-        msg !== lastTransferProgressMsg &&
+        statusKey !== lastTransferStatusKey &&
         !ev.payload.finished &&
         msg !== '準備貼上…' &&
         msg !== '準備跨 PC 貼上…' &&
         msg !== '正在計算大小…' &&
         msg !== 'scanning size...'
       ) {
-        lastTransferProgressMsg = msg
+        lastTransferStatusKey = statusKey
         // 狀態列變化也寫進日誌，避免只有 detailLog 才有字
         if (!diag || !diag.includes(msg)) {
           appendTransferLog(`狀態：${msg}`)

@@ -16,7 +16,7 @@ use crate::pc_remote_discovery::{check_remote_upload_conflicts, ensure_pc_remote
 #[cfg(target_os = "android")]
 use crate::folder_picker::folder_picker;
 use crate::remote_pc_transfer::{
-    build_transfer_summary_log, emit_progress_active, remote_transfer_cancelled,
+    build_transfer_summary_log, cap_event_list, emit_progress_active, remote_transfer_cancelled,
     reset_remote_transfer_cancel, RemoteTransferFailedItem, RemoteTransferProgressEvent,
 };
 
@@ -390,8 +390,9 @@ pub async fn upload_remote_pc_files(
         finished: true,
         error,
         detail_log: Some(summary_log),
-        succeeded_paths: Some(succeeded),
-        failed_items: Some(failed),
+        succeeded_paths: cap_event_list(Some(succeeded)),
+        failed_items: cap_event_list(Some(failed)),
+        log_seq: None,
     }
     .emit(app);
     Ok(())

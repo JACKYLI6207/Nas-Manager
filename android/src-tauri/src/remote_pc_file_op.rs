@@ -79,6 +79,8 @@ struct FileOpProgressSnapshot {
     log_line: Option<String>,
     #[serde(default)]
     detail_log: String,
+    #[serde(default)]
+    log_seq: u64,
 }
 
 fn emit_paste_progress(
@@ -105,6 +107,7 @@ fn emit_paste_progress(
         detail_log: detail,
         succeeded_paths: None,
         failed_items: None,
+        log_seq: (snap.log_seq > 0).then_some(snap.log_seq),
     }
     .emit(app);
 }
@@ -252,6 +255,7 @@ pub async fn remote_pc_paste_with_progress(
             error: None,
             log_line: None,
             detail_log: String::new(),
+            log_seq: 0,
         },
         false,
         None,
@@ -288,6 +292,7 @@ pub async fn remote_pc_paste_with_progress(
                             error: None,
                             log_line: None,
                             detail_log: String::new(),
+                            log_seq: 0,
                         },
                         false,
                         None,
@@ -335,6 +340,7 @@ pub async fn remote_pc_paste_with_progress(
                     error: Some("已取消".to_string()),
                     log_line: None,
                     detail_log: String::new(),
+                    log_seq: 0,
                 },
                 true,
                 Some("已取消".to_string()),
